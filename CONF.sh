@@ -2,6 +2,17 @@
 # CONF.sh — централізовані налаштування
 ########################################
 
+
+################################################################################
+# Якщо SCRIPT_DIR не задано зовнішнім скриптом — визначимо автоматично.
+# BASH_SOURCE[0] всередині "source" вказує саме на цей файл CONF.sh
+if [[ -z "${SCRIPT_DIR:-}" ]]; then
+  # Папка, де лежить CONF.sh (у вашій структурі це корінь проєкту)
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+################################################################################
+
+
 ################################################################################
 # 0)
 DUT_COUNT=3								# кількість
@@ -10,7 +21,6 @@ WAN_IFACE="eth8"
 NM_ETHERNET_NAME="Wired connection 1"				# базовий профіль NM, який виводить у VLAN
 SSH_USER="root"
 SSH_PASS="ui"                						# або "ubnt" пароль
-SSH_USE_SSHPASS=1
 
 # 1) Логи
 LOG_DIR="${LOG_DIR:-"$SCRIPT_DIR/Logs"}"                              	# стандартна папка для логів
@@ -128,7 +138,11 @@ IPERF_UDP_RATE_M=950       # Mbps для UDP (якщо UDP-тест)
 IPERF_MIN_MBIT=900         # поріг "проходить" за замовчуванням
 # якщо є ethtool — модуль сам підлаштує поріг під 100M/1G/2.5G/10G
 IPERF_NET_BASE="10.10"     # адреси будуть 10.10.<DUT>.1 і 10.10.<DUT>.2/24
+IPERF_VLAN_BASE=1000
 
+
+IPERF3_BIN="/usr/bin/iperf3"
+BASE_IFACE="enxa0cec87043c0" # Фізичний інтерфейс ПК, підключений до trunk 0/25 (USW-Pro-24)
 # Для кожного DUT вкажи пару локальних інтерфейсів (ліва/права «ноги» до двох портів DUT)
 # Приклад для 2 DUT. Можна задати до 10.
 declare -A IPERF_IFACE_PAIR
@@ -139,15 +153,5 @@ IPERF_MIN_100M=90
 IPERF_MIN_1G=930
 IPERF_MIN_2G5=2400
 IPERF_MIN_10G=9500
-
-# --- Back-compat для старих функцій ---
-: "${DUT_SSH_USER:=root}"
-: "${DUT_SSH_PASS:=ui}"
-export SSH_USER="$DUT_SSH_USER"
-export SSH_PASS="$DUT_SSH_PASS"
-
-# SSH control sockets: БЕЗ пробілів/дужок
-SSH_CTRL_DIR="${HOME}/.sshctl_udmpro"   # ← новий безпечний шлях
-SSH_CONTROL_PERSIST=120                 # як було
 
 

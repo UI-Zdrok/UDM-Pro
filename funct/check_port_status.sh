@@ -55,13 +55,13 @@ check_port_status() {
 
 # --- SSH транспорт: sshpass (якщо є пароль) + окремий ControlPath на кожен DUT ---
 # ControlPath робимо унікальним для кожного DUT, інакше мультиплекс може «піти» не тим VLAN.
-# --- SSH транспорт: sshpass + окремий ControlPath на кожен DUT ---
 local _ctrl_dir="${SSH_CTRL_DIR:-"$SCRIPT_DIR/.sshctl"}"
 mkdir -p "$_ctrl_dir" 2>/dev/null || true
 local _ctrl_path="$_ctrl_dir/cm-%r@%h:%p-dut${dut_idx}"
 
 if [ -n "${DUT_SSH_PASS:-}" ] && [ "${SSH_USE_SSHPASS:-1}" -eq 1 ] && command -v sshpass >/dev/null 2>&1; then
-  export SSHPASS="$DUT_SSH_PASS"    # щоб пароль не світився у ps
+  # Безпечніше через змінну середовища, щоб пароль не світився у `ps`
+  export SSHPASS="$DUT_SSH_PASS"
   SSH_BASE=(sshpass -e ssh
     -o StrictHostKeyChecking=no
     -o UserKnownHostsFile=/dev/null
@@ -74,7 +74,7 @@ if [ -n "${DUT_SSH_PASS:-}" ] && [ "${SSH_USE_SSHPASS:-1}" -eq 1 ] && command -v
     -b "$src_ip"
   )
 else
-  # Без пароля: не намагайся питати інтерективно (BatchMode=yes)
+  # Без пароля: або ключі, або нічого — тоді відрубаємо будь-які інтерективні запити
   SSH_BASE=(ssh
     -o BatchMode=yes
     -o StrictHostKeyChecking=no
@@ -87,17 +87,8 @@ else
   )
 fi
 
-  _plog_port "(DUT $dut_idx, port $port_num, ifname='$ifname', src_ip=$src_ip, dst_ip=$dst_ip)"
-  # Швидка перевірка SSH-доступності до DUT із потрібної src-адреси
-if ! "${SSH_BASE[@]}" "${DUT_SSH_USER:-root}@$dst_ip" "echo SSH_OK" \
-      1>/dev/null 2>>"$_LOG_FILE"; then
-  _plog_port "DUT $dut_idx: SSH FAILED (src=$src_ip -> $dst_ip). Перевір DUT_SSH_PASS/sshpass/route."
-  # Далі сенсу немає — фіксуємо not connected
-  echo "Port $port_num is not connected"
-  _plog_port "----- PortStatus: done -----"
-  return 1
-fi
 
+  _plog_port "(DUT $dut_idx, port $port_num, ifname='$ifname', src_ip=$src_ip, dst_ip=$dst_ip)"
 
   # === 3) ethtool/sysfs (перший прохід; може бути неточним для switch-портів) ==
   local et="" link="" speed="" speed_mbps=""

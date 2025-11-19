@@ -13,12 +13,7 @@ export SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CONF_FILE="${CONF_FILE:-$SCRIPT_DIR/CONF.sh}"
 [ -r "$CONF_FILE" ] && . "$CONF_FILE" || echo "WARNING: CONF.sh not found, using built-ins"
 ########################################################################
-# --- Global logging bootstrap (щоб не було unbound) ---
-LOG_DIR="${LOG_DIR:-"$SCRIPT_DIR/Logs"}"
-mkdir -p "$LOG_DIR" 2>/dev/null || true
-RUN_TS="${RUN_TS:-$(date +%F_%H-%M-%S)}"
-LOG_FILE="${LOG_FILE:-$LOG_DIR/run_${RUN_TS}.log}"
-export LOG_DIR LOG_FILE RUN_TS
+
 
 ########################################################################
 # ------ Підключення check_port_status.sh ------
@@ -325,22 +320,21 @@ run_iperf_for_all_duts() {
   local failures=0
   local dut_count="${DUT_COUNT:-2}"   # або як у тебе визначено кількість DUT
   
-    # Попросимо sudo (потрібен для netns/ip link)
+    # Кешуємо sudo — щоб prepare та ip-команди всередині модуля не питали пароль по 100 разів
   if ! sudo -n true 2>/dev/null; then
     _plog "iPerf3: requesting sudo for netns (iperf3)"
     sudo -v || { _plog "iPerf3: sudo cancelled — skipping iPerf3"; return 1; }
   fi
 
+  # Підготуємо VLAN-підінтерфейси для всіх DUTів (створить, якщо нема)
+  CONF_FILE="$CONF_FILE" bash "$SCRIPT_DIR/funct/prepare_vlan_ifaces.sh"
+  
   for dut in $(seq 1 "$dut_count"); do
-    _plog "----- iPerf3: start ----- (DUT $dut)"
-    if sudo -n true 2>/dev/null; then
-      sudo bash -c "source \"$CONF_FILE\"; source \"$IPERF_LIB\"; iperf3_test_run_for_dut $dut"
-    else
-      _plog "NOTICE: running iperf3 without sudo may fail; trying anyway..."
-      ( source "$CONF_FILE"; source "$IPERF_LIB"; iperf3_test_run_for_dut "$dut" )
-    fi
+        _plog "----- iPerf3: start ----- (DUT $dut)"
+    CONF_FILE="$CONF_FILE" bash "$IPERF_LIB" "$dut"
     rc=$?
     _plog "----- iPerf3: done ------ (DUT $dut) rc=$rc"
+
     [ $rc -ne 0 ] && failures=$((failures+1))
   done
 
@@ -440,7 +434,7 @@ function setup_usw_pro_24() {
 ##################################################################
 
 ##################################################################
-#Ця функція очікує натискання клавіши для продовження виконання скрипту
+#Функція очікує натискання клавіши для продовження виконання скрипту
 press_any_key() {
     read -n 1 -s -r -p "Press any key to continue..."
     echo ""
@@ -448,99 +442,16 @@ press_any_key() {
 ##################################################################
 
 ##################################################################
-# Пояснення просто:
-# 1) Визначаємо src_ip для цього DUT (спочатку через _dut_src_ip, інакше з ip route).
-# 2) Готуємо безпечний ControlPath (без пробілів).
-# 3) Якщо є пароль і sshpass — підставляємо його; інакше працюємо в BatchMode (ключі).
-# 4) Виконуємо команду на DUT; stdout прокидається наверх (можна робити VAR=$(run_dut_command "...")).
+#функція виконує команду SSH на DUT з IP 192.168.1.1
+# НЕ глушить stderr, щоб у логах було видно причину (host unreachable, auth, тощо).
 run_dut_command() {
-  # --- 0) Команда, користувач/пароль, ціль -----------------------------------
-  local cmd="$*"
-  local user="${DUT_SSH_USER:-root}"
-  local pass="${DUT_SSH_PASS:-}"
-  local dst="${ip:-}"
-  local idx="${dut_idx:-}"
-
-  if [[ -z "$dst" ]]; then
-    echo "run_dut_command: ERROR: змінна ip порожня" >&2
-    return 127
-  fi
-  # порожню команду замінимо на true (щоб не падати)
-  [[ -z "$cmd" ]] && cmd="true"
-
-  # --- 1) Лог-файли (безпечні дефолти, щоб не було unbound) -------------------
-  local __LOG_DIR="${LOG_DIR:-"${SCRIPT_DIR:-.}/Logs"}"
-  mkdir -p "$__LOG_DIR" >/dev/null 2>&1 || true
-  local __RUN_TS="${RUN_TS:-$(date +%F_%H-%M-%S)}"
-  local __LOG_FILE="${LOG_FILE:-$__LOG_DIR/run_${__RUN_TS}.log}"
-
-  # --- 2) Обчислити src_ip (звідки підемо) -----------------------------------
-  local bsrc=""
-  if declare -f _dut_src_ip >/dev/null 2>&1; then
-    bsrc="$(_dut_src_ip "${idx:-1}")"
-  fi
-  # санітизуємо: якщо не «чиста» IPv4, беремо з ip route get
-  local _is_ipv4='^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
-  if ! printf '%s' "${bsrc:-}" | grep -Eq "$_is_ipv4"; then
-    bsrc="$(ip route get "$dst" 2>/dev/null | awk '/src /{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
-  fi
-  # опції прив’язки (лише якщо маємо валідну IPv4)
-  local -a SSH_BIND_OPTS=()
-  if printf '%s' "${bsrc:-}" | grep -Eq "$_is_ipv4"; then
-    SSH_BIND_OPTS=(-4 -o BindAddress="$bsrc")
-  fi
-
-  # --- 3) Безпечний ControlPath (без пробілів/дужок) -------------------------
-  local _base="${SSH_CTRL_DIR:-$HOME/.sshctl_udmpro}"
-  case "$_base" in *[[:space:]]*|\(*\)|*\)* ) _base="/tmp/sshctl_udmpro_$USER" ;; esac
-  mkdir -p "$_base" >/dev/null 2>&1 || true
-  # %C — стабільний хеш параметрів підключення; додаємо мітку dutN
-  local _ctrl_path="${_base}/cm-%C-dut${idx:-X}"
-
-  # --- 4) Дрібний дебаг у лог -------------------------------------------------
-  printf 'run_dut_command: dut=%s ip=%s src=%s ctrl=%s cmd=%s\n' \
-         "${idx:-?}" "$dst" "${bsrc:-<none>}" "$_ctrl_path" "$cmd" >> "$__LOG_FILE"
-  if printf '%s' "${bsrc:-}" | grep -Eq "$_is_ipv4"; then
-    if ping -I "$bsrc" -c1 -W1 "$dst" >/dev/null 2>&1; then
-      echo "ping_ok src=$bsrc -> $dst" >> "$__LOG_FILE"
-    else
-      echo "ping_fail src=$bsrc -> $dst" >> "$__LOG_FILE"
-    fi
-  fi
-
-  # --- 5) SSH-база (спільні опції) -------------------------------------------
-  local -a BASE_SSH_OPTS=(
-    -o StrictHostKeyChecking=no
-    -o UserKnownHostsFile=/dev/null
-    -o ConnectTimeout=3
-    -o ControlMaster=auto
-    -o ControlPath="$_ctrl_path"
-    -o ControlPersist="${SSH_CONTROL_PERSIST:-120}"
-  )
-
-  # --- 6) Запуск: з паролем (sshpass) або у BatchMode (ключі) ----------------
-  if [[ -n "$pass" && "${SSH_USE_SSHPASS:-1}" -eq 1 ]] && command -v sshpass >/dev/null 2>&1; then
-    # Пароль через env, щоб не світився у ps
-    SSHPASS="$pass" sshpass -e ssh \
-      "${BASE_SSH_OPTS[@]}" \
-      "${SSH_BIND_OPTS[@]}" \
-      -o PreferredAuthentications=keyboard-interactive,password \
-      -o PubkeyAuthentication=no \
-      "$user@$dst" "$cmd"
-  else
-    # Без пароля: не питаємо інтерективно
-    ssh \
-      -o BatchMode=yes \
-      "${BASE_SSH_OPTS[@]}" \
-      "${SSH_BIND_OPTS[@]}" \
-      "$user@$dst" "$cmd"
-  fi
+  local ip="${DUT_IPS[$((CURRENT_DUT-1))]:-192.168.1.1}"
+  sshpass -p "${SSH_PASS:-ui}" ssh \
+    -o UserKnownHostsFile=/dev/null \
+    -o StrictHostKeyChecking=no \
+    "${SSH_USER:-root}@$ip" "$@" 2>/dev/null
 }
 
-
-##################################################################
-
-##################################################################
 # Те саме, але ніколи не ламає пайплайни у set -e|pipefail
 run_dut_command_quiet() {
   run_dut_command "$@" >/dev/null 2>&1 || true
@@ -815,6 +726,9 @@ echo "----- FW: start -----"
 (
   # У підоболонці тимчасово без "еррехіт" і без pipefail — як у testORIG.sh
   set +e +o pipefail
+	# Перед FW-апдейтом переконаймось, що NM-профілі прив'язані до реальних інтерфейсів
+	CONF_FILE="$CONF_FILE" bash "$SCRIPT_DIR/funct/nm_fix_vlan_bindings.sh"
+
   _run_fw_check_upgrade
 )
 rc=$?
