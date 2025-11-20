@@ -24,6 +24,17 @@ mkdir -p "$SCRIPT_DIR/funct" 2>/dev/null || true
 
 
 ########################################################################
+# --- Підключення модуля ручного кроку RESET ---
+RESET_LIB="$SCRIPT_DIR/funct/manual_reset.sh"
+if [[ -r "$RESET_LIB" ]]; then
+  # shellcheck source=/dev/null
+  . "$RESET_LIB"          # дає функцію manual_reset_step
+else
+  echo "WARNING: $RESET_LIB не знайдено — крок RESET буде пропущено"
+fi
+########################################################################
+
+########################################################################
 # --- iPerf3 flags (дефолти) ---
 ONLY_IPERF=0   # запустити ТІЛЬКИ iPerf3-тест
 SKIP_IPERF=0   # пропустити iPerf3-тест у повному прогоні
@@ -322,17 +333,18 @@ run_iperf_for_all_duts() {
   
     # Кешуємо sudo — щоб prepare та ip-команди всередині модуля не питали пароль по 100 разів
   if ! sudo -n true 2>/dev/null; then
-    _plog "iPerf3: requesting sudo for netns (iperf3)"
+    _plog "iPerf3: requesting sudo for ip commands (ip link/addr/rule/route)"
     sudo -v || { _plog "iPerf3: sudo cancelled — skipping iPerf3"; return 1; }
   fi
 
   # Підготуємо VLAN-підінтерфейси для всіх DUTів (створить, якщо нема)
   CONF_FILE="$CONF_FILE" bash "$SCRIPT_DIR/funct/prepare_vlan_ifaces.sh"
   
-  for dut in $(seq 1 "$dut_count"); do
-        _plog "----- iPerf3: start ----- (DUT $dut)"
-    CONF_FILE="$CONF_FILE" bash "$IPERF_LIB" "$dut"
-    rc=$?
+	for dut in $(seq 1 "$dut_count"); do
+    	_plog "----- iPerf3: start ----- (DUT $dut)"
+	mkdir -p Logs 2>/dev/null || true
+	CONF_FILE="$CONF_FILE" bash "$IPERF_LIB" "$dut" | tee -a "Logs/iperf3_DUT${dut}_$(date +%F_%H-%M-%S).log"
+	rc=${PIPESTATUS[0]}
     _plog "----- iPerf3: done ------ (DUT $dut) rc=$rc"
 
     [ $rc -ne 0 ] && failures=$((failures+1))
@@ -696,6 +708,30 @@ function _dut_touch_tests()
 
     echo -e "\n\n(all units) Check that the link status LED port 11 on the DUT is GREEN"
     press_any_key
+    echo "____________________________________________________________________________________________________"
+    
+    # -----  Кнопка скидання ----- 
+	for i in $(seq 1 "${DUT_COUNT:-2}"); do
+		set_current_dut "$i"
+		sleep 2
+
+    	# інтерфейс для цього DUT: v1000..v1011 (формула 999+i)
+    	src_if="v$((999+i))"
+
+    	# 1) Підказка користувачу — ЗАВЖДИ
+    	printf "\n\n(DUT #%d) Briefly press the RESET button (do NOT hold it)\n" "$i"
+
+    	# 2) Ping як діагностика (не блокує підказку)
+    	if ! ping -I "$src_if" -c1 -W1 192.168.1.1 >/dev/null 2>&1; then
+        	echo "WARN: ping via $src_if failed for DUT #$i (продовжуємо за натисканням кнопки)"
+    	fi
+
+    	# 3) Чекаємо подію від кнопки на DUT
+    	#    Якщо у тебе точно event0 — лишай як було;
+    	#    нижче — трохи тихіша версія з 'status=none'
+    	run_dut_command "dd if=/dev/input/event0 of=/dev/null bs=96 count=1 status=none" >/dev/null 2>&1
+	done
+    
     
 }
 ##################################################################
@@ -733,6 +769,7 @@ echo "----- FW: start -----"
 )
 rc=$?
 echo "----- FW: done ------"
+echo "____________________________________________________________________________________________________"
 if [ "$rc" -ne 0 ]; then
   echo "ERROR: FW step ⚠️ failed with code $rc"
   exit "$rc"
@@ -791,6 +828,7 @@ else
   # ... інші тести ...
 fi
 echo "----- IPERF: done ------"
+echo "____________________________________________________________________________________________________"
 echo ""
 ##################################################################
 
