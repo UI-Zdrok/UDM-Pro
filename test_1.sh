@@ -87,19 +87,19 @@ FW_LIB="${FW_LIB:-"$SCRIPT_DIR/funct/fw_check_upgrade.sh"}"
 
 # Вмикаємо зрозумілу діагностику помилок
 set -Eeuo pipefail
-trap 'echo "ERROR: ${BASH_SOURCE[0]}:${LINENO}: ${BASH_COMMAND}" >&2' ERR
+trap 'echo "⚠️ ERROR: ${BASH_SOURCE[0]}:${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
 # Підключаємо файл як бібліотеку (тільки визначення функцій!)
 if [ -r "$FW_LIB" ]; then
   . "$FW_LIB"
 else
-  echo "ERROR: fw_check_upgrade.sh not found at: $FW_LIB"
+  echo "⚠️ ERROR: fw_check_upgrade.sh not found at: $FW_LIB"
   exit 1
 fi
 
 # Перевіряємо, що функція з'явилась
 if ! declare -F _run_fw_check_upgrade >/dev/null; then
-  echo "ERROR: _run_fw_check_upgrade is not defined after sourcing $FW_LIB"
+  echo "⚠️ ERROR: _run_fw_check_upgrade is not defined after sourcing $FW_LIB"
   exit 1
 fi
 ########################################################################
@@ -234,11 +234,17 @@ _dut_ifname() {
 
 
 ########################################################################
+# ХЕЛПЕР 3
+
+########################################################################
+
+
+########################################################################
 #гілка, яка не використовує netns
 # --- TRUNK-режим: два VLAN-підінтерфейси на одній фізичній карті, без netns ---
 iperf3_test_main_trunk() {
   if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-    __iperf_log "ERROR: iperf3 (trunk) потребує root (sudo)."
+    __iperf_log "⚠️ ERROR: iperf3 (trunk) потребує root (sudo)."
     return 1
   fi
 
@@ -310,7 +316,7 @@ iperf3_test_main_trunk() {
     rc=1
   fi
 
-  echo "RESULT=${Mbps_rounded}Mbps; THRESH=${THRESH_MIN_MBIT}Mbps; STATUS=$([ $rc -eq 0 ] && echo PASS || echo FAIL)" >>"$log_file"
+  echo "RESULT=${Mbps_rounded}Mbps; THRESH=${THRESH_MIN_MBIT}Mbps; STATUS=$([ $rc -eq 0 ] && echo PASS || echo ⚠️FAIL)" >>"$log_file"
   __iperf_log "----- iPerf3: done (DUT $dut_idx) -----"
   return "$rc"
 }
@@ -445,6 +451,7 @@ function setup_usw_pro_24() {
 }
 ##################################################################
 
+
 ##################################################################
 #Функція очікує натискання клавіши для продовження виконання скрипту
 press_any_key() {
@@ -452,6 +459,7 @@ press_any_key() {
     echo ""
 }
 ##################################################################
+
 
 ##################################################################
 #функція виконує команду SSH на DUT з IP 192.168.1.1
@@ -475,17 +483,126 @@ run_dut_command_quiet() {
 ##################################################################
 #функція завантажує файл на пристрій під управлінням IP 192.168.1.1 з використанням SCP (до успіху)
 # Завантажити файл(и) на /tmp активного DUT
-dut_upload() {
-  local ip="${DUT_IPS[$((CURRENT_DUT-1))]:-192.168.1.1}"
-  while ! sshpass -p "${SSH_PASS:-ui}" scp \
-      -o UserKnownHostsFile=/dev/null \
-      -o StrictHostKeyChecking=no \
-      "$@" "${SSH_USER:-root}@$ip:/tmp/" ; do
-    sleep 1
-  done 2>/dev/null
+# ------------------------------------------------------------
+# dut_upload <локальний_файл> [<віддалений_повний_шлях_на_DUT>]
+# Копіює файл на поточний DUT (IP береться з $DUT_IP або 192.168.1.1).
+# За замовчуванням кладе у /tmp з тим же ім'ям.
+# Параметри з CONF.sh:
+#   SSH_PASS            — пароль root (якщо потрібен). Якщо порожній — використовує key-based auth.
+# Додатково (опційно через env):
+#   LAB_IGNORE_HOSTKEY  — =1 (дефолт) ігнорувати known_hosts (зручно для стенду з однаковим IP) ;
+#                         =0 — перевіряти ключі як звичайно.
+#   VERIFY_UPLOAD       — =1 перевіряти md5 після копіювання (потрібен md5sum на DUT).
+# Пише діагностику у $LOG_DIR (папку створить).
+# Повертає 0/1.
+# ------------------------------------------------------------
+function dut_upload() {
+    local src="${1:-}"
+    local dst="${2:-}"
+    local ip="${DUT_IP:-192.168.1.1}"
+    local user="${DUT_USER:-root}"
+
+    # --- базові перевірки ---
+    if [ -z "$src" ]; then
+        echo "dut_upload: не вказано локальний файл" >&2
+        return 1
+    fi
+    if [ ! -r "$src" ]; then
+        echo "dut_upload: файл '$src' не існує або недоступний" >&2
+        return 1
+    fi
+    if [ -z "$dst" ]; then
+        dst="/tmp/$(basename "$src")"
+    fi
+
+    # --- підготовка логів ---
+    mkdir -p "$LOG_DIR"
+    local logf="$LOG_DIR/upload_$(date +%F_%H-%M-%S).log"
+
+    # --- SSH/SCP опції (не ламають інші скрипти, бо локальні для цієї функції) ---
+    local -a SSH_OPTS=()
+    if [ "${LAB_IGNORE_HOSTKEY:-1}" = "1" ]; then
+        SSH_OPTS+=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null)
+    fi
+
+    # --- вибір способу: ключі або пароль (sshpass) ---
+    local -a CMD
+    if [ -n "${SSH_PASS:-}" ]; then
+        if ! command -v sshpass >/dev/null 2>&1; then
+            echo "dut_upload: встанови sshpass або прибери SSH_PASS (зараз: пароль задано, але sshpass відсутній)" | tee -a "$logf" >&2
+            return 1
+        fi
+        CMD=(sshpass -p "$SSH_PASS" scp "${SSH_OPTS[@]}" -q -- "$src" "${user}@${ip}:${dst}")
+    else
+        CMD=(scp "${SSH_OPTS[@]}" -q -- "$src" "${user}@${ip}:${dst}")
+    fi
+
+    # --- саме копіювання ---
+    if ! "${CMD[@]}" 2>>"$logf"; then
+        echo "dut_upload: копіювання '$src' → ${user}@${ip}:$dst FAILED" | tee -a "$logf" >&2
+        return 1
+    fi
+
+    # --- опційна верифікація md5 ---
+    if [ "${VERIFY_UPLOAD:-0}" = "1" ]; then
+        local md5_local md5_remote
+        if command -v md5sum >/dev/null 2>&1; then
+            md5_local="$(md5sum "$src" | awk '{print $1}')"
+            # з паролем/без пароля — та ж логіка, що й для scp
+            if [ -n "${SSH_PASS:-}" ]; then
+                md5_remote="$(sshpass -p "$SSH_PASS" ssh "${SSH_OPTS[@]}" -q "${user}@${ip}" "md5sum '$dst' 2>/dev/null | awk '{print \$1}'")"
+            else
+                md5_remote="$(ssh "${SSH_OPTS[@]}" -q "${user}@${ip}" "md5sum '$dst' 2>/dev/null | awk '{print \$1}'")"
+            fi
+            if [ -z "$md5_remote" ] || [ "$md5_local" != "$md5_remote" ]; then
+                echo "dut_upload: MD5 mismatch ($md5_local != $md5_remote) для '$dst' на DUT" | tee -a "$logf" >&2
+                return 1
+            fi
+        else
+            echo "dut_upload: md5sum недоступний локально — пропускаю перевірку" | tee -a "$logf"
+        fi
+    fi
+
+    [ -n "${DEBUG:-}" ] && echo "dut_upload: OK '$src' → ${user}@${ip}:$dst" | tee -a "$logf"
+    return 0
 }
 
+
 ##################################################################
+
+
+##################################################################
+# Хелпер
+# На поточному DUT: залити файли та перевірити синтаксис on-device скрипта
+# Викликаємо ПЕРЕД будь-якою on-device функцією
+run_ondevice_preflight() {
+    local conf_bn
+    conf_bn="$(basename "$CONF_FILE")"
+
+    # 1) Залити файли у /tmp
+    dut_upload "$SCRIPT_DIR/on-device-tests.sh"    || return 1
+    dut_upload "$CONF_FILE"                        || return 1
+
+    # 2) Права + синтаксис (щоб бачити зрозумілу причину, якщо щось не так)
+    run_dut_command "chmod +x /tmp/on-device-tests.sh && bash -n /tmp/on-device-tests.sh" || return 1
+}
+##################################################################
+
+
+##################################################################
+# Хелпер
+# На поточному DUT: підключити on-device файл і ВИКЛИКАТИ конкретну функцію
+# При цьому блокуємо автозапуск “головного блоку” через RUN_ONDEVICE_MAIN=0
+run_ondevice_func() {
+    local func="$1"; shift
+    local conf_bn
+    conf_bn="$(basename "$CONF_FILE")"
+
+    run_dut_command \
+      "RUN_ONDEVICE_MAIN=0 CONF_FILE=/tmp/$conf_bn bash -lc '. /tmp/on-device-tests.sh; type $func >/dev/null; $func \"$@\"'"
+}
+##################################################################
+
 
 ##################################################################
 #функція керую мережевим з'єднанням для DUT
@@ -494,7 +611,7 @@ set_current_dut() {
   for f in $(seq 1 "$DUT_COUNT"); do
     local name="DUT $f LAN"
     if [ "$f" -eq "$1" ]; then
-      _nm_up_safe "$name" || { echo "ERROR: cannot bring up \"$name\""; return 1; }
+      _nm_up_safe "$name" || { echo "⚠️ ERROR: cannot bring up \"$name\""; return 1; }
     else
       _nm_down_quiet "$name"
     fi
@@ -535,6 +652,26 @@ function _run_self_tests() {
             run_dut_command "[ ! -f /tmp/refurbish_test_done ]" && DUT_NOT_DONE=1 && echo "Waiting on DUT $i..."
         done
     done
+    
+    OVERALL_FAIL=0
+	for i in $(seq 1 "$DUT_COUNT"); do
+		set_current_dut "$i"
+		if run_dut_command "[ -f /tmp/refurbish_test_failed ]"; then
+		    echo "DUT $i: self-tests FAILED"
+		    OVERALL_FAIL=1
+		elif run_dut_command "[ -f /tmp/refurbish_test_passed ]"; then
+		    echo "DUT $i: self-tests PASSED"
+		else
+		    echo "DUT $i: self-tests UNKNOWN (no markers)"
+		    OVERALL_FAIL=1
+		fi
+	done
+
+	# Зафіксувати провал для зовнішньої логіки
+	if [ "$OVERALL_FAIL" -ne 0 ]; then
+		return 1
+	fi
+
 
     #Перевірка результатів тестів та збір логів
     BAIL=0
@@ -567,34 +704,328 @@ function _run_self_tests() {
 }
 ##################################################################
 
-##################################################################
-#виконує тест портів на кожному DUT 
-function _run_port_tests() {
-    #ініциалізація масиву для зберігання тестів
-    declare -A TEST_RESULTS
-    #ім'я лог файлу
-    LOG_FILE="$LOG_DIR/port_tests_$(date +%F_%H-%M-%S).txt"
 
-    for i in $(seq 1 $DUT_COUNT); do
+##################################################################
+# Функції з on-device-tests
+
+# ------------------------------------------------------------
+# Перевірка портів на всіх DUT.
+# - На КОЖНИЙ DUT заливає on-device-tests.sh і CONF.sh (у /tmp)
+# - Робить префлайт (chmod + syntax check)
+# - Викликає ЛИШЕ функцію __dut_8370_test (без автозапуску інших тестів)
+# - Логи пише в $LOG_DIR/port_tests_*.log
+function run_port_tests() {
+    # 1) Логи
+    mkdir -p "$LOG_DIR"
+    local LOG_FILE="$LOG_DIR/port_tests_$(date +%F_%H-%M-%S).log"
+
+    # 2) Підсумки по кожному DUT
+    declare -A TEST_RESULTS
+
+    # 3) Цикл по DUT (дефолт 1, якщо DUT_COUNT не задано)
+    for i in $(seq 1 "${DUT_COUNT:-1}"); do
+        # Виставляємо контекст поточного DUT (IP, MAC тощо)
         set_current_dut "$i"
-        echo "Running port tests on DUT $i" | tee -a $LOG_FILE
-        #виконує команди та зберігає PID
-        #Визиває функцію run_dut_command, яка виконує команду на DUT через SSH. Команда виконує скрипт /tmp/on-device-tests.sh, а потім запускає тест __dut_8370_test на DUT.
-        if run_dut_command "/tmp/on-device-tests.sh && __dut_8370_test"; then
-            echo "Port tests on DUT $i passed" | tee -a $LOG_FILE
+
+        echo "Running port tests on DUT $i" | tee -a "$LOG_FILE"
+
+        # 3.1) Префлайт: заливка файлів + права + перевірка синтаксису
+        if ! run_ondevice_preflight; then
+            echo "Port tests on DUT $i ⚠️ failed (preflight)" | tee -a "$LOG_FILE"
+            TEST_RESULTS[$i]="failed"
+            echo "run_port_tests FINISHED" | tee -a "$LOG_FILE"
+            continue
+        fi
+
+        # 3.2) Виклик on-device функції (без автозапуску головного блоку)
+        if run_ondevice_func "__dut_8370_test"; then
+            echo "Port tests on DUT $i passed" | tee -a "$LOG_FILE"
             TEST_RESULTS[$i]="passed"
         else
-            echo "Port tests on DUT $i ⚠️ failed" | tee -a $LOG_FILE
+            echo "Port tests on DUT $i ⚠️ failed" | tee -a "$LOG_FILE"
             TEST_RESULTS[$i]="failed"
         fi
+
+        # 3.3) Маркер завершення для читабельності логів (як у твоєму виводі)
+        echo "run_port_tests FINISHED" | tee -a "$LOG_FILE"
     done
 
-    #логування результатів тесту
-    echo "Port test results:" | tee -a $LOG_FILE
-    for i in $(seq 1 $DUT_COUNT); do
-        echo "DUT $i: ${TEST_RESULTS[$i]}" | tee -a $LOG_FILE
-        echo "run_port_tests FINISHED"
+	# 4) Підсумок + код повернення
+	echo "Port test results:" | tee -a "$LOG_FILE"
+	overall_fail=0
+	for i in $(seq 1 "${DUT_COUNT:-1}"); do
+		res="${TEST_RESULTS[$i]:-n/a}"
+		echo "DUT $i: $res" | tee -a "$LOG_FILE"
+		[ "$res" = "failed" ] && overall_fail=1
+	done
+	return $overall_fail
+
+}
+
+# Зворотна сумісність зі старою назвою
+function _run_port_tests() { run_port_tests "$@"; }
+
+
+# ------------------------------------------------------------
+# Перевірка Fans
+function run_fan_tests() {
+    mkdir -p "$LOG_DIR"
+    local LOG_FILE="$LOG_DIR/fan_tests_$(date +%F_%H-%M-%S).log"
+    declare -A TEST_RESULTS
+
+    for i in $(seq 1 "${DUT_COUNT:-1}"); do
+        set_current_dut "$i"
+        echo "Running fan tests on DUT $i" | tee -a "$LOG_FILE"
+
+        if ! run_ondevice_preflight; then
+            echo "Fan tests on DUT $i ⚠️ failed (preflight)" | tee -a "$LOG_FILE"
+            TEST_RESULTS[$i]="failed"; continue
+        fi
+
+        if run_ondevice_func "__dut_system_test_fans" 2>&1 | tee -a "$LOG_FILE" | tail -n +1 >/dev/null; then
+            echo "Fan tests on DUT $i passed" | tee -a "$LOG_FILE"
+            TEST_RESULTS[$i]="passed"
+        else
+            echo "Fan tests on DUT $i ⚠️ failed" | tee -a "$LOG_FILE"
+            TEST_RESULTS[$i]="failed"
+        fi
+
+        echo "run_fan_tests FINISHED" | tee -a "$LOG_FILE"
     done
+
+    echo "Fan test results:" | tee -a "$LOG_FILE"
+    for i in $(seq 1 "${DUT_COUNT:-1}"); do
+        echo "DUT $i: ${TEST_RESULTS[$i]:-n/a}" | tee -a "$LOG_FILE"
+    done
+}
+
+
+# ------------------------------------------------------------
+# Перевірка Memory
+function run_memory_tests() {
+    mkdir -p "$LOG_DIR"
+    local LOG_FILE="$LOG_DIR/memory_tests_$(date +%F_%H-%M-%S).log"
+    declare -A TEST_RESULTS
+
+    for i in $(seq 1 "${DUT_COUNT:-1}"); do
+        set_current_dut "$i"
+        echo "Running memory tests on DUT $i" | tee -a "$LOG_FILE"
+
+        if ! run_ondevice_preflight; then
+            echo "Memory tests on DUT $i ⚠️ failed (preflight)" | tee -a "$LOG_FILE"
+            TEST_RESULTS[$i]="failed"; continue
+        fi
+
+        if run_ondevice_func "__dut_system_test_memory" 2>&1 | tee -a "$LOG_FILE" | tail -n +1 >/dev/null; then
+            echo "Memory tests on DUT $i passed" | tee -a "$LOG_FILE"
+            TEST_RESULTS[$i]="passed"
+        else
+            echo "Memory tests on DUT $i ⚠️ failed" | tee -a "$LOG_FILE"
+            TEST_RESULTS[$i]="failed"
+        fi
+
+        echo "run_memory_tests FINISHED" | tee -a "$LOG_FILE"
+    done
+
+    echo "Memory test results:" | tee -a "$LOG_FILE"
+    for i in $(seq 1 "${DUT_COUNT:-1}"); do
+        echo "DUT $i: ${TEST_RESULTS[$i]:-n/a}" | tee -a "$LOG_FILE"
+    done
+}
+
+
+# ------------------------------------------------------------
+# Перевірка SATA HDD
+function run_sata_tests() {
+    mkdir -p "$LOG_DIR"
+    local LOG_FILE="$LOG_DIR/sata_tests_$(date +%F_%H-%M-%S).log"
+    declare -A TEST_RESULTS
+
+    for i in $(seq 1 "${DUT_COUNT:-1}"); do
+        set_current_dut "$i"
+        echo "Running SATA tests on DUT $i" | tee -a "$LOG_FILE"
+
+        if ! run_ondevice_preflight; then
+            echo "SATA tests on DUT $i ⚠️ failed (preflight)" | tee -a "$LOG_FILE"
+            TEST_RESULTS[$i]="failed"; continue
+        fi
+
+        if run_ondevice_func "__dut_system_test_sata_hdd" 2>&1 | tee -a "$LOG_FILE" | tail -n +1 >/dev/null; then
+            echo "SATA tests on DUT $i passed" | tee -a "$LOG_FILE"
+            TEST_RESULTS[$i]="passed"
+        else
+            echo "SATA tests on DUT $i ⚠️ failed" | tee -a "$LOG_FILE"
+            TEST_RESULTS[$i]="failed"
+        fi
+
+        echo "run_sata_tests FINISHED" | tee -a "$LOG_FILE"
+    done
+
+    echo "SATA test results:" | tee -a "$LOG_FILE"
+    for i in $(seq 1 "${DUT_COUNT:-1}"); do
+        echo "DUT $i: ${TEST_RESULTS[$i]:-n/a}" | tee -a "$LOG_FILE"
+    done
+}
+
+
+# ------------------------------------------------------------
+# Перевірка eMMC
+function run_emmc_tests() {
+    mkdir -p "$LOG_DIR"
+    local LOG_FILE="$LOG_DIR/emmc_tests_$(date +%F_%H-%M-%S).log"
+    declare -A TEST_RESULTS
+
+    for i in $(seq 1 "${DUT_COUNT:-1}"); do
+        set_current_dut "$i"
+        echo "Running eMMC tests on DUT $i" | tee -a "$LOG_FILE"
+
+        if ! run_ondevice_preflight; then
+            echo "eMMC tests on DUT $i ⚠️ failed (preflight)" | tee -a "$LOG_FILE"
+            TEST_RESULTS[$i]="failed"; continue
+        fi
+
+        if run_ondevice_func "__dut_system_test_emmc" 2>&1 | tee -a "$LOG_FILE" | tail -n +1 >/dev/null; then
+            echo "eMMC tests on DUT $i passed" | tee -a "$LOG_FILE"
+            TEST_RESULTS[$i]="passed"
+        else
+            echo "eMMC tests on DUT $i ⚠️ failed" | tee -a "$LOG_FILE"
+            TEST_RESULTS[$i]="failed"
+        fi
+
+        echo "run_emmc_tests FINISHED" | tee -a "$LOG_FILE"
+    done
+
+    echo "eMMC test results:" | tee -a "$LOG_FILE"
+    for i in $(seq 1 "${DUT_COUNT:-1}"); do
+        echo "DUT $i: ${TEST_RESULTS[$i]:-n/a}" | tee -a "$LOG_FILE"
+    done
+}
+
+
+# ------------------------------------------------------------
+# Перевірка Bluetooth
+function run_bluetooth_tests() {
+    mkdir -p "$LOG_DIR"
+    local LOG_FILE="$LOG_DIR/bluetooth_tests_$(date +%F_%H-%M-%S).log"
+    declare -A TEST_RESULTS
+    for i in $(seq 1 "${DUT_COUNT:-1}"); do
+        set_current_dut "$i"
+        echo "Running Bluetooth tests on DUT $i" | tee -a "$LOG_FILE"
+        if ! run_ondevice_preflight; then
+            echo "Bluetooth tests on DUT $i ⚠️ failed (preflight)" | tee -a "$LOG_FILE"
+            TEST_RESULTS[$i]="failed"; echo "run_bluetooth_tests FINISHED" | tee -a "$LOG_FILE"; continue
+        fi
+        if run_ondevice_func "__dut_system_test_bluetooth" 2>&1 | tee -a "$LOG_FILE" | tail -n +1 >/dev/null; then
+            echo "Bluetooth tests on DUT $i passed" | tee -a "$LOG_FILE"; TEST_RESULTS[$i]="passed"
+        else
+            echo "Bluetooth tests on DUT $i ⚠️ failed" | tee -a "$LOG_FILE"; TEST_RESULTS[$i]="failed"
+        fi
+        echo "run_bluetooth_tests FINISHED" | tee -a "$LOG_FILE"
+    done
+    echo "Bluetooth test results:" | tee -a "$LOG_FILE"
+    for i in $(seq 1 "${DUT_COUNT:-1}"); do echo "DUT $i: ${TEST_RESULTS[$i]:-n/a}" | tee -a "$LOG_FILE"; done
+}
+
+
+
+# ------------------------------------------------------------
+# Перевірка Sensors
+function run_sensors_tests() {
+    mkdir -p "$LOG_DIR"
+    local LOG_FILE="$LOG_DIR/sensors_tests_$(date +%F_%H-%M-%S).log"
+    declare -A TEST_RESULTS
+    for i in $(seq 1 "${DUT_COUNT:-1}"); do
+        set_current_dut "$i"
+        echo "Running sensors tests on DUT $i" | tee -a "$LOG_FILE"
+        if ! run_ondevice_preflight; then
+            echo "Sensors tests on DUT $i ⚠️ failed (preflight)" | tee -a "$LOG_FILE"
+            TEST_RESULTS[$i]="failed"; echo "run_sensors_tests FINISHED" | tee -a "$LOG_FILE"; continue
+        fi
+        if run_ondevice_func "__dut_system_test_sensors" 2>&1 | tee -a "$LOG_FILE" | tail -n +1 >/dev/null; then
+            echo "Sensors tests on DUT $i passed" | tee -a "$LOG_FILE"; TEST_RESULTS[$i]="passed"
+        else
+            echo "Sensors tests on DUT $i ⚠️ failed" | tee -a "$LOG_FILE"; TEST_RESULTS[$i]="failed"
+        fi
+        echo "run_sensors_tests FINISHED" | tee -a "$LOG_FILE"
+    done
+    echo "Sensors test results:" | tee -a "$LOG_FILE"
+    for i in $(seq 1 "${DUT_COUNT:-1}"); do echo "DUT $i: ${TEST_RESULTS[$i]:-n/a}" | tee -a "$LOG_FILE"; done
+}
+
+# ------------------------------------------------------------
+# Перевірка cpu count
+function run_cpu_count_tests() {
+    mkdir -p "$LOG_DIR"
+    local LOG_FILE="$LOG_DIR/cpu_count_$(date +%F_%H-%M-%S).log"
+    declare -A TEST_RESULTS
+    for i in $(seq 1 "${DUT_COUNT:-1}"); do
+        set_current_dut "$i"
+        echo "Running CPU count test on DUT $i" | tee -a "$LOG_FILE"
+        if ! run_ondevice_preflight; then
+            echo "CPU count on DUT $i ⚠️ failed (preflight)" | tee -a "$LOG_FILE"
+            TEST_RESULTS[$i]="failed"; echo "run_cpu_count_tests FINISHED" | tee -a "$LOG_FILE"; continue
+        fi
+        if run_ondevice_func "__dut_system_test_cpu_count" 2>&1 | tee -a "$LOG_FILE" | tail -n +1 >/dev/null; then
+            echo "CPU count on DUT $i passed" | tee -a "$LOG_FILE"; TEST_RESULTS[$i]="passed"
+        else
+            echo "CPU count on DUT $i ⚠️ failed" | tee -a "$LOG_FILE"; TEST_RESULTS[$i]="failed"
+        fi
+        echo "run_cpu_count_tests FINISHED" | tee -a "$LOG_FILE"
+    done
+    echo "CPU count results:" | tee -a "$LOG_FILE"
+    for i in $(seq 1 "${DUT_COUNT:-1}"); do echo "DUT $i: ${TEST_RESULTS[$i]:-n/a}" | tee -a "$LOG_FILE"; done
+}
+
+# ------------------------------------------------------------
+# Перевірка CPU port map
+function run_switch_cpu_port_tests() {
+    mkdir -p "$LOG_DIR"
+    local LOG_FILE="$LOG_DIR/switch_cpu_port_$(date +%F_%H-%M-%S).log"
+    declare -A TEST_RESULTS
+    for i in $(seq 1 "${DUT_COUNT:-1}"); do
+        set_current_dut "$i"
+        echo "Running 8370 CPU port test on DUT $i" | tee -a "$LOG_FILE"
+        if ! run_ondevice_preflight; then
+            echo "8370 CPU port on DUT $i ⚠️ failed (preflight)" | tee -a "$LOG_FILE"
+            TEST_RESULTS[$i]="failed"; echo "run_switch_cpu_port_tests FINISHED" | tee -a "$LOG_FILE"; continue
+        fi
+        if run_ondevice_func "__dut_8370_cpu_port_test" 2>&1 | tee -a "$LOG_FILE" | tail -n +1 >/dev/null; then
+            echo "8370 CPU port on DUT $i passed" | tee -a "$LOG_FILE"; TEST_RESULTS[$i]="passed"
+        else
+            echo "8370 CPU port on DUT $i ⚠️ failed" | tee -a "$LOG_FILE"; TEST_RESULTS[$i]="failed"
+        fi
+        echo "run_switch_cpu_port_tests FINISHED" | tee -a "$LOG_FILE"
+    done
+    echo "8370 CPU port results:" | tee -a "$LOG_FILE"
+    for i in $(seq 1 "${DUT_COUNT:-1}"); do echo "DUT $i: ${TEST_RESULTS[$i]:-n/a}" | tee -a "$LOG_FILE"; done
+}
+# ------------------------------------------------------------
+# Перевірка RAM
+function run_mem_count_tests() {
+    mkdir -p "$LOG_DIR"
+    local LOG_FILE="$LOG_DIR/mem_count_$(date +%F_%H-%M-%S).log"
+    declare -A TEST_RESULTS
+
+    for i in $(seq 1 "${DUT_COUNT:-1}"); do
+        set_current_dut "$i"
+        echo "Running mem-count test on DUT $i" | tee -a "$LOG_FILE"
+
+        if ! run_ondevice_preflight; then
+            echo "Mem-count on DUT $i ⚠️ failed (preflight)" | tee -a "$LOG_FILE"
+            TEST_RESULTS[$i]="failed"; echo "run_mem_count_tests FINISHED" | tee -a "$LOG_FILE"; continue
+        fi
+
+        if run_ondevice_func "__dut_system_test_mem_count" 2>&1 | tee -a "$LOG_FILE" | tail -n +1 >/dev/null; then
+            echo "Mem-count on DUT $i passed" | tee -a "$LOG_FILE"; TEST_RESULTS[$i]="passed"
+        else
+            echo "Mem-count on DUT $i ⚠️ failed" | tee -a "$LOG_FILE"; TEST_RESULTS[$i]="failed"
+        fi
+
+        echo "run_mem_count_tests FINISHED" | tee -a "$LOG_FILE"
+    done
+
+    echo "Mem-count results:" | tee -a "$LOG_FILE"
+    for i in $(seq 1 "${DUT_COUNT:-1}"); do echo "DUT $i: ${TEST_RESULTS[$i]:-n/a}" | tee -a "$LOG_FILE"; done
 }
 ##################################################################
 
@@ -635,7 +1066,6 @@ function _run_wan_tests() {
 	fi
 
     done
-    echo "____________________________________________________________________________________________________"
     echo "run_wan_tests $DUT_MAC FINISHED"
 }
 ##################################################################
@@ -682,12 +1112,12 @@ function run_temperature_check() {
 
 
 ##################################################################
-function run_all_stress_tests() {
-    run_cpu_stress_test
-    run_memory_stress_test
-    run_disk_stress_test
-    run_network_stress_test
-    run_temperature_check
+function run_all_stress_tests() {			#
+    run_cpu_stress_test						#
+    run_memory_stress_test					#
+    run_disk_stress_test					#
+    run_network_stress_test					#
+    run_temperature_check					#
 }
 ##################################################################
 
@@ -711,26 +1141,26 @@ function _dut_touch_tests()
     echo "____________________________________________________________________________________________________"
     
     # -----  Кнопка скидання ----- 
-	for i in $(seq 1 "${DUT_COUNT:-2}"); do
-		set_current_dut "$i"
-		sleep 2
+	#for i in $(seq 1 "${DUT_COUNT:-2}"); do
+	#	set_current_dut "$i"
+	#	sleep 2
 
     	# інтерфейс для цього DUT: v1000..v1011 (формула 999+i)
-    	src_if="v$((999+i))"
+    #	src_if="v$((999+i))"
 
     	# 1) Підказка користувачу — ЗАВЖДИ
-    	printf "\n\n(DUT #%d) Briefly press the RESET button (do NOT hold it)\n" "$i"
+    #	printf "\n\n(DUT #%d) Briefly press the RESET button (do NOT hold it)\n" "$i"
 
     	# 2) Ping як діагностика (не блокує підказку)
-    	if ! ping -I "$src_if" -c1 -W1 192.168.1.1 >/dev/null 2>&1; then
-        	echo "WARN: ping via $src_if failed for DUT #$i (продовжуємо за натисканням кнопки)"
-    	fi
+    #	if ! ping -I "$src_if" -c1 -W1 192.168.1.1 >/dev/null 2>&1; then
+    #    	echo "WARN: ping via $src_if ⚠️ failed for DUT #$i (продовжуємо за натисканням кнопки)"
+    #	fi
 
     	# 3) Чекаємо подію від кнопки на DUT
     	#    Якщо у тебе точно event0 — лишай як було;
     	#    нижче — трохи тихіша версія з 'status=none'
-    	run_dut_command "dd if=/dev/input/event0 of=/dev/null bs=96 count=1 status=none" >/dev/null 2>&1
-	done
+    #	run_dut_command "dd if=/dev/input/event0 of=/dev/null bs=96 count=1 status=none" >/dev/null 2>&1
+	#done
     
     
 }
@@ -747,8 +1177,16 @@ setup_usw_pro_24
 echo "Please turn on all DUTs and wait for them to finish booting."
 press_any_key
 
-echo "For manual tests, the script will give you a series of prompts.  For each prompt, follow the instructions.  If the test passes, press any key.  If the test fails, abort the script by hitting Ctrl+C."
+echo "For manual tests, the script will give you a series of prompts.  For each prompt, follow the instructions.  If the test passes, press any key.  If the test ⚠️ fails, abort the script by hitting Ctrl+C."
 press_any_key
+
+
+
+##################################################################
+
+############################ ВИКОНАННЯ ###########################
+
+##################################################################
 
 #Виклик функцій
 _dut_touch_tests
@@ -770,8 +1208,9 @@ echo "----- FW: start -----"
 rc=$?
 echo "----- FW: done ------"
 echo "____________________________________________________________________________________________________"
+echo ""
 if [ "$rc" -ne 0 ]; then
-  echo "ERROR: FW step ⚠️ failed with code $rc"
+  echo "⚠️ ERROR: FW step ⚠️ failed with code $rc"
   exit "$rc"
 fi
 ##################################################################
@@ -792,13 +1231,28 @@ echo ""
 
 for i in $(seq 1 "$DUT_COUNT"); do
 	echo "Running port tests on DUT $i"
-	# Активуємо лише профіль поточного DUT і гасимо інші (щоб маршрути/ARP не плутались)
+	# Активуємо лише профіль поточного DUT і гасимо інші **DUT-профілі** (Wi-Fi/VPN не чіпаємо)
 	_con_for() { printf "${CONNECTION_TEMPLATE:-DUT %d LAN}" "$1"; }
 
-	nmcli -t -f NAME con show --active | grep -Fvx -- "$(_con_for "$i")" \
-	| xargs -r -I{} nmcli con down "{}" >/dev/null 2>&1 || true
+	# Вимкнути інші DUT-профілі, крім поточного
+	for j in $(seq 1 "${DUT_COUNT:-1}"); do
+	  if [ "$j" -ne "$i" ]; then
+		nmcli con down "$(_con_for "$j")" >/dev/null 2>&1 || true
+	  fi
+	done
 
+	# Увімкнути профіль поточного DUT
 	nmcli con up "$(_con_for "$i")" >/dev/null 2>&1 || true
+
+
+	# вимакає усі з'єднання крім з DUT
+	# Активуємо лише профіль поточного DUT і гасимо інші (щоб маршрути/ARP не плутались)
+	#_con_for() { printf "${CONNECTION_TEMPLATE:-DUT %d LAN}" "$1"; }
+
+	#nmcli -t -f NAME con show --active | grep -Fvx -- "$(_con_for "$i")" \
+	#| xargs -r -I{} nmcli con down "{}" >/dev/null 2>&1 || true
+
+	#nmcli con up "$(_con_for "$i")" >/dev/null 2>&1 || true
 
 	# (Опційно) короткий роут-чек: має показати саме інтерфейс/VLAN цього DUT
 	route_line="$(ip route get "$DUT_TARGET_IP" from "$(_dut_src_ip "$i")" 2>/dev/null | head -n1)"
@@ -819,27 +1273,94 @@ echo ""
 
 
 ##################################################################
-echo "----- IPERF: start -----"
-if [ "${ONLY_IPERF:-0}" -eq 1 ]; then
-  run_iperf_for_all_duts || OVERALL_FAIL=1
-else
-  # ... інші тести ...
-  run_iperf_for_all_duts || OVERALL_FAIL=1
-  # ... інші тести ...
-fi
-echo "----- IPERF: done ------"
+_run_wan_tests
 echo "____________________________________________________________________________________________________"
 echo ""
 ##################################################################
 
-_run_port_tests
-_run_wan_tests
+##################################################################
+echo "----- on-device-tests: start -----"
+: "${OVERALL_FAIL:=0}"   # якщо ще не ініціалізований — зроби 0; інакше збережи попередній стан
+if ! run_port_tests; then OVERALL_FAIL=1; fi
+echo "____________________________________________________________________________________________________"
+echo ""
+#if ! run_fan_tests; then OVERALL_FAIL=1; fi
+echo "____________________________________________________________________________________________________"
+echo ""
+if ! run_bluetooth_tests; then OVERALL_FAIL=1; fi
+echo "____________________________________________________________________________________________________"
+echo ""
+if ! run_sensors_tests; then OVERALL_FAIL=1; fi
+echo "____________________________________________________________________________________________________"
+echo ""
+if ! run_switch_cpu_port_tests; then OVERALL_FAIL=1; fi
+echo "____________________________________________________________________________________________________"
+echo ""
+if ! run_cpu_count_tests; then OVERALL_FAIL=1; fi
+echo "____________________________________________________________________________________________________"
+echo ""
+if ! run_mem_count_tests; then OVERALL_FAIL=1; fi
+echo "____________________________________________________________________________________________________"
+echo ""
+if ! run_memory_tests; then OVERALL_FAIL=1; fi
+echo "____________________________________________________________________________________________________"
+echo ""
+if ! run_sata_tests; then OVERALL_FAIL=1; fi
+echo "____________________________________________________________________________________________________"
+echo ""
+if ! run_emmc_tests; then OVERALL_FAIL=1; fi
+echo "____________________________________________________________________________________________________"
+echo ""
+#if ! run_wan_tests; then OVERALL_FAIL=1; fi
+echo "____________________________________________________________________________________________________"
+echo ""
+if [ "${OVERALL_FAIL:-0}" -ne 0 ]; then
+  echo "on-device-tests: overall FAILED"
+  exit 1
+else
+  echo "on-device-tests: overall PASSED"
+fi
+
+echo "----- on-device-tests: done ------"
+echo "____________________________________________________________________________________________________"
+echo ""
+##################################################################
+
+
+##################################################################
+# Виклик функцій для стрес-тестів
+#run_all_stress_tests
+##################################################################
+
+
+##################################################################
 # Звавнтажує файли на DUT
 _run_self_tests			
-# Виклик функцій для стрес-тестів
-run_all_stress_tests
+##################################################################
+
+
+##################################################################
+#echo "----- IPERF: start -----"
+#if [ "${ONLY_IPERF:-0}" -eq 1 ]; then
+#  run_iperf_for_all_duts || OVERALL_FAIL=1
+#else
+  # ... інші тести ...
+#  run_iperf_for_all_duts || OVERALL_FAIL=1
+  # ... інші тести ...
+#fi
+#echo "----- IPERF: done ------"
+#echo "____________________________________________________________________________________________________"
+#echo ""
+##################################################################
+
 
 echo ""
 echo ""
+echo ""
+if [ "${OVERALL_FAIL:-0}" -eq 0 ]; then
+    echo "All devices passed."
+else
+    echo "Some devices FAILED."
+    exit 1
+fi
 
-echo "All devices passed."

@@ -21,6 +21,8 @@
 #
 # НЕ додавайте shebang у бібліотеку; цей файл ПІДКЛЮЧАЄТЬСЯ командою `source`.
 
+#!/usr/bin/env bash
+set -Eeuo pipefail
 
 _run_fw_check_upgrade() {
     
@@ -70,19 +72,20 @@ _run_fw_check_upgrade() {
                 echo "Major: $FW_MAJOR, Minor: $FW_MINOR, Patch: $FW_PATCH"
 
                 UPGRADE_REQUIRED=0
-                if [ "$FW_MAJOR" -eq 1 ]; then
+                if [ "${FW_MAJOR:-0}" -eq 1 ]; then
                     UPGRADE_REQUIRED=1
-                    if [ "$FW_MINOR" -lt 12 ] || ([ "$FW_MINOR" -eq 12 ] && [ "$FW_PATCH" -lt 38 ]); then
+                    #if [ "${FW_MINOR:-0}" -lt 12 ] || ([ "${FW_MINOR:-0}" -eq 12 ] && [ "${FW_PATCH:-0}" -lt 38 ]); then
+                    if [ "${FW_MINOR:-0}" -lt 12 ] || { [ "${FW_MINOR:-0}" -eq 12 ] && [ "${FW_PATCH:-0}" -lt 38 ]; }; then
                         FW_UPGRADE_URI="http://fw-download.ubnt.com/data/udm/1adc-udmpro-1.12.38-ca8a490ac2b04247abb3f7d3e3eae01a.bin"
                     else
                         FW_UPGRADE_URI="http://fw-download.ubnt.com/data/udm/e2cf-udmpro-2.4.27-795aaf430714433faaea9e0dfeb4e5bf.bin"
                     fi
                 fi
-                if [ "$FW_MAJOR" -eq 2 ]; then
-                    if [ "$FW_MINOR" -lt 4 ] || ([ "$FW_MINOR" -eq 4 ] && [ "$FW_PATCH" -lt 27 ]); then
+                if [ "${FW_MAJOR:-0}" -eq 2 ]; then
+                    if [ "${FW_MINOR:-0}" -lt 4 ] || ([ "${FW_MINOR:-0}" -eq 4 ] && [ "${FW_PATCH:-0}" -lt 27 ]); then
                         UPGRADE_REQUIRED=1
                         FW_UPGRADE_URI="https://fw-download.ubnt.com/data/udm/e2cf-udmpro-2.4.27-795aaf430714433faaea9e0dfeb4e5bf.bin"
-                    elif [ "$FW_MINOR" -lt 5 ] || ([ "$FW_MINOR" -eq 5 ] && [ "$FW_PATCH" -lt 17 ]); then
+                    elif [ "${FW_MINOR:-0}" -lt 5 ] || ([ "${FW_MINOR:-0}" -eq 5 ] && [ "${FW_PATCH:-0}" -lt 17 ]); then
                         UPGRADE_REQUIRED=1
                         FW_UPGRADE_URI="https://fw-download.ubnt.com/data/unifi-dream/10c9-UDMPRO-2.5.17-4ef0556d8b844aa6ac43c695ef076479.bin"
                     else
@@ -90,17 +93,17 @@ _run_fw_check_upgrade() {
                         FW_UPGRADE_URI="https://fw-download.ubnt.com/data/unifi-dream/fb51-UDMPRO-3.0.20-c9d8c62c8a9a4ef18413881434197f30.bin"
                     fi
                 fi
-                if [ "$FW_MAJOR" -eq 3 ]; then
-                    if [ "$FW_MINOR" -lt 1 ] || ([ "$FW_MINOR" -eq 1 ] && [ "$FW_PATCH" -lt 15 ]); then
+                if [ "${FW_MAJOR:-0}" -eq 3 ]; then
+                    if [ "${FW_MINOR:-0}" -lt 1 ] || ([ "${FW_MINOR:-0}" -eq 1 ] && [ "${FW_PATCH:-0}" -lt 15 ]); then
                         UPGRADE_REQUIRED=1
                         FW_UPGRADE_URI="https://fw-download.ubnt.com/data/unifi-dream/6982-UDMPRO-3.1.15-6d62a07a-7a86-4bf1-90a4-f4029bf0e7aa.bin"
-                    elif [ "$FW_MINOR" -eq 1 ] && [ "$FW_PATCH" -lt 16 ]; then
+                    elif [ "${FW_MINOR:-0}" -eq 1 ] && [ "${FW_PATCH:-0}" -lt 16 ]; then
                         UPGRADE_REQUIRED=1
                         FW_UPGRADE_URI="https://fw-download.ubnt.com/data/unifi-dream/84e6-UDMPRO-3.1.16-54b0d2b8-e966-4dbf-973e-bbc84c58ce47.bin"
-                    elif [ "$FW_MINOR" -eq 2 ] && [ "$FW_PATCH" -lt 7 ]; then
+                    elif [ "${FW_MINOR:-0}" -eq 2 ] && [ "${FW_PATCH:-0}" -lt 7 ]; then
                         UPGRADE_REQUIRED=1
                         FW_UPGRADE_URI="https://fw-download.ubnt.com/data/unifi-dream/7514-UDMPRO-3.2.7-9f58607c-4e10-4974-920a-4699b8cee57c.bin"
-                    elif [ "$FW_MINOR" -eq 2 ] && [ "$FW_PATCH" -lt 9 ]; then
+                    elif [ "${FW_MINOR:-0}" -eq 2 ] && [ "${FW_PATCH:-0}" -lt 9 ]; then
                         UPGRADE_REQUIRED=1
                         FW_UPGRADE_URI="https://fw-download.ubnt.com/data/unifi-dream/5adb-UDMPRO-3.2.9-06d3e7d3-b93c-48ed-baeb-d804bc4c090d.bin"
                     else
@@ -109,14 +112,14 @@ _run_fw_check_upgrade() {
                         #FW_UPGRADE_URI="https://fw-download.ubnt.com/data/unifi-dream/b1a0-UDMPRO-3.2.12-24a7e106-d7e6-4c63-aefa-046c7eaf5a8e.bin"
                     fi
                 fi
-                if [ "$FW_MAJOR" -eq 4 ]; then
-                	if [ "$FW_MINOR" -lt 0 ] || ([ "$FW_MINOR" -eq 0 ] && [ "$FW_PATCH" -lt 21 ]); then
+                if [ "${FW_MAJOR:-0}" -eq 4 ]; then
+                	if [ "${FW_MINOR:-0}" -lt 0 ] || ([ "${FW_MINOR:-0}" -eq 0 ] && [ "${FW_PATCH:-0}" -lt 21 ]); then
                 		UPGRADE_REQUIRED=1
                 		FW_UPGRADE_URI="https://fw-download.ubnt.com/data/unifi-dream/7b91-UDMPRO-4.0.21-815ad824-3992-449d-8a0f-c731232bb20f.bin"
-                	elif [ "$FW_MINOR" -eq 1 ] && [ "$FW_PATCH" -lt 13 ]; then
+                	elif [ "${FW_MINOR:-0}" -eq 1 ] && [ "${FW_PATCH:-0}" -lt 13 ]; then
                 		UPGRADE_REQUIRED=1
                 		FW_UPGRADE_URI="https://fw-download.ubnt.com/data/unifi-dream/b012-UDMPRO-4.1.13-4bc426ae-2619-4f5f-8d19-7502798be61a.bin"
-                	elif [ "$FW_MINOR" -eq 1 ] && [ "$FW_PATCH" -lt 22 ]; then
+                	elif [ "${FW_MINOR:-0}" -eq 1 ] && [ "${FW_PATCH:-0}" -lt 22 ]; then
                 		UPGRADE_REQUIRED=1
                 		FW_UPGRADE_URI="https://fw-download.ubnt.com/data/unifi-dream/171a-UDMPRO-4.1.22-6d3b9408-0ec3-4a3b-a15e-aade09f1302c.bin"
                 	else

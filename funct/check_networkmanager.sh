@@ -1,5 +1,7 @@
 #!/bin/bash
-#
+##!/usr/bin/env bash
+set -Eeuo pipefail
+
 # МОДУЛЬ: funct/check_networkmanager.sh
 check_networkmanager() {
     #створюється порожній масив та виведення повідомлення
@@ -7,7 +9,7 @@ check_networkmanager() {
     echo "Checking NetworkManager configuration..."
     
     #ініціалізується нулями для кожного DUT
-    for i in $(seq 1 $DUT_COUNT); do
+    for i in $(seq 1 "${DUT_COUNT:-2}"); do
         FLAG_DUT_LAN_EXISTS[$i]=0
     done
     
@@ -15,7 +17,7 @@ check_networkmanager() {
     CONNECTIONS=$(nmcli con show)
 
     #Перевірка чи існують підключення для кожного DUT
-    for i in $(seq 1 $DUT_COUNT); do
+    for i in $(seq 1 "${DUT_COUNT:-2}"); do
         if echo "$CONNECTIONS" | grep -q "$NM_ETHERNET_NAME"; then
             FLAG_DUT_LAN_EXISTS[$i]=1
             echo "DUT $i: NetworkManager connection exists"
@@ -32,7 +34,7 @@ check_networkmanager() {
         #Якщо знайдено підключення з ім'ям NM_ETHERNET_NAME, то змінна FLAG_NM_ETHERNET_NAME_EXISTS встановлюється в 1.
         if [ "$i" == "$NM_ETHERNET_NAME" ]; then FLAG_NM_ETHERNET_NAME_EXISTS=1;
         fi
-        for j in $(seq 1 $DUT_COUNT); do
+        for j in $(seq 1 ${DUT_COUNT:-2}); do
             #Якщо знайдено підключення з ім'ям формату "DUT X LAN", де X - номер пристрою, відповідний елемент в масиві FLAG_DUT_LAN_EXISTS встановлюється в 1
             if [ "$i" == "DUT $j LAN" ]; then FLAG_DUT_LAN_EXISTS[$j]=1;
             fi
@@ -49,7 +51,7 @@ check_networkmanager() {
     nmcli con up "$NM_ETHERNET_NAME"
 
     #Створення підключень для DUT, якщо вони не існують
-    for i in $(seq 1 $DUT_COUNT); do
+    for i in $(seq 1 ${DUT_COUNT:-2}); do
         if [ "${FLAG_DUT_LAN_EXISTS[$i]}" -ne 1 ]; then
             echo "DUT $i LAN connection does not exist, creating..."
             #Визначається MASTER_IFACE_NAME (ідентифікатор основного інтерфейсу) для NM_ETHERNET_NAME
