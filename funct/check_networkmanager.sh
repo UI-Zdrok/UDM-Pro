@@ -15,7 +15,32 @@ check_networkmanager() {
     
     #Отримання списку всіх мереж
     CONNECTIONS=$(nmcli con show)
+    
+########################################################################
+	# НОРМАЛІЗАЦІЯ ІСНУЮЧИХ "DUT i LAN"
+	# Якщо профіль "DUT i LAN" вже існує, але має НЕ vlan-тип
+    for i in $(seq 1 "${DUT_COUNT:-2}"); do
+        cname="DUT $i LAN"
 
+        # Перевіряємо, чи взагалі є таке підключення в NM
+        if nmcli -g NAME con show 2>/dev/null | grep -Fxq "$cname"; then
+            # Дізнаємося тип підключення (ethernet / vlan / …)
+            ctype="$(nmcli -g connection.type con show "$cname" 2>/dev/null || echo "")"
+
+            # Якщо це НЕ VLAN – видаляємо, щоб створити правильно
+            if [ "$ctype" != "vlan" ]; then
+                echo "DUT $i LAN exists as type '$ctype' (must be 'vlan') — recreating..."
+                nmcli con delete "$cname" || true
+
+                # Позначаємо, що для цього DUT треба створити профіль заново
+                FLAG_DUT_LAN_EXISTS[$i]=0
+            fi
+        fi
+    done
+########################################################################
+
+
+########################################################################
     #Перевірка чи існують підключення для кожного DUT
     for i in $(seq 1 "${DUT_COUNT:-2}"); do
         if echo "$CONNECTIONS" | grep -q "$NM_ETHERNET_NAME"; then

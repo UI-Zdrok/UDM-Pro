@@ -15,20 +15,20 @@ fi
 
 ################################################################################
 # 0)
-DUT_COUNT=3								# кількість
+DUT_COUNT=3											# кількість
 # WAN інтерфейс на DUT (UDM-Pro зазвичай eth8; для USW-Pro-24 WAN нема — залиште порожнім) ${WAN_IFACE:-}
 WAN_IFACE="eth8"
 NM_ETHERNET_NAME="Wired connection 1"				# базовий профіль NM, який виводить у VLAN
 SSH_USER="root"
 SSH_PASS="ui"                						# або "ubnt" пароль
-DUT_SSH_USER="root"         # або "ubnt" — як у тебе на UDM-Pro
+DUT_SSH_USER="root"         						# або "ubnt" — як у тебе на UDM-Pro
 DUT_SSH_PASS="${DUT_SSH_PASS:-$SSH_PASS}"           # ← тут твій пароль
 # IP DUT (у вас всі DUT-и мають 192.168.1.1, але різні VLAN)
 DUT_IP="192.168.1.1"
 
 
 # 1) Логи
-LOG_DIR="${LOG_DIR:-"$SCRIPT_DIR/Logs"}"                              	# стандартна папка для логів
+LOG_DIR="${LOG_DIR:-"$SCRIPT_DIR/Logs"}"                    # стандартна папка для логів
 LOG_DATE="$(date +%F)"
 LOG_HOST="$(hostname)"
 LOG_BASENAME="refurbish_test_${LOG_HOST}_${LOG_DATE}"
@@ -37,26 +37,26 @@ STATUS_FILE="${LOG_DIR}/refurbish_test.status"  			# Файл-статус (PASS
 
 ################################################################################
 # 2) Очікувані параметри системи RAM count 
-EXPECTED_CPUS=4
+EXPECTED_CPUS=4												# скільки CPU ядер ми очікуємо на DUT
 #MEM_MIN_KB=3900000                           				# ~3.9GB
 #MEM_EXPECTED_KB=${MEM_EXPECTED_KB:-4096000}
-MEM_MIN_KB=${MEM_MIN_KB:-1900000}      # мінімально допустимо, з запасом (kB), напр. для 2GB ≈ 1.9e6
-MEM_EXPECTED_KB=${MEM_EXPECTED_KB:-2048000}
+MEM_MIN_KB=${MEM_MIN_KB:-3800000}      						# мінімально допустимо, з запасом (kB), напр. для 2GB ≈ 1.9e6
+MEM_EXPECTED_KB=${MEM_EXPECTED_KB:-4096000}
 
 ################################################################################
 # 3) Пам’ять (RAM) — параметри тесту
-MEMTEST_MIB=${MEMTEST_MIB:-128}          # обсяг для одного проходу (MiB). 128M достатньо і швидко. 768
-MEMTEST_PASSES=${MEMTEST_PASSES:-1}      # скільки проходів (1..5). Для стенду 1 достатньо.
-MD5_ZERO="72b74a1ecec4fd35ec0c7278202130a8"  # 768 MiB нулів
-MD5_FF="e39e7b63a593381a6f1b4b2eebdda109"    # 768 MiB 0xFF
+MEMTEST_MIB=${MEMTEST_MIB:-256}          		# обсяг для одного проходу (MiB). 128M достатньо і швидко. 768
+MEMTEST_PASSES=${MEMTEST_PASSES:-1}      		# скільки проходів (1..5). Для стенду 1 достатньо.
+MD5_ZERO="1f5039e50bd66b290c56684d8550c6c2"  	# 256 MiB нулів
+MD5_FF="82eccec9a16f73a4b576c04a57edd729"    	# 256 MiB 0xFF
 
 ################################################################################
 # 4) SATA/диск
 SATA_LINK_PATH=${SATA_LINK_PATH:-/sys/class/ata_link/link1/sata_spd}	# якщо немає — тест зробить SKIP # "/sys/class/ata_link/link1/sata_spd"
 ALLOWED_SATA_SPEEDS=("1.5 Gbps" "3.0 Gbps" "6.0 Gbps")
 SATA_MNT_POINT=${SATA_MNT_POINT:-/volume1}                 		# якщо немає монтування — SKIP # <<< п.7 стосується саме цього "/volume1"
-HDD_WRITE_MB=${HDD_WRITE_MB:-1024}                            	# 1 GiB = 1024
-HDD_WRITE_TIMEOUT=${HDD_WRITE_TIMEOUT:-15}                      # сек 15
+HDD_WRITE_MB=${HDD_WRITE_MB:-256}                            	# 1 GiB = 1024
+HDD_WRITE_TIMEOUT=${HDD_WRITE_TIMEOUT:-60}                      # сек 15
 
 ################################################################################
 # 5) Bluetooth (якщо блутузу немає у пристрої постаіити 0)

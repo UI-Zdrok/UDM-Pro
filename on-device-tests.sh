@@ -70,51 +70,132 @@ export __bail
 ########################################################################
 
 
+######################################################################## РЕАЛІЗУВАТИ
+# Перевірка вільного місця на основних розділах
+__dut_system_test_storage_usage() {
+    # ми хочемо подивитися root, /data, /mnt/data, /srv, тощо
+    local min_root_pct=15   # мінімум 15% вільно
+    local min_data_pct=15
+
+    __log "Checking filesystem usage..."
+
+    df -h | __log
+
+    # приклад перевірки кореня
+    local used_pct
+    used_pct="$(df -P / | awk 'NR==2{gsub("%","",$5); print $5}')"
+    if [ -n "$used_pct" ] && [ "$used_pct" -gt $((100 - min_root_pct)) ]; then
+        __bail "Root FS usage too high: ${used_pct}% used"
+        return 1
+    fi
+
+    # аналогічно можна перевірити /data або /srv
+    __log "Filesystem usage OK"
+    return 0
+}
+########################################################################
+
+
+########################################################################
+#MD5
+# Стрес-тест пам'яті:
+#   - розмір блоку беремо з MEMTEST_MIB (МіБ)
+#   - к-сть проходів з MEMTEST_PASSES
+#   - еталонні MD5:
+#       * спочатку пробуємо взяти з CONF.sh (MD5_ZERO, MD5_FF)
+#       * якщо там їх немає — рахуємо динамічно
 function __dut_system_test_memory() {
-    local mib="${MEMTEST_MIB:-128}"
+	# 1) Розмір тесту (MiB) та к-сть проходів
+    local mib="${MEMTEST_MIB:-256}"
     local passes="${MEMTEST_PASSES:-1}"
     [ "$passes" -ge 1 ] || passes=1
 
     __log "Running memory tests... size=${mib}MiB, passes=${passes}"
 
-    # Динамічно рахуємо еталонні md5 (без запису на диск)
-    local MD5_ZERO MD5_FF
-    MD5_ZERO="$(head -c "${mib}M" /dev/zero | md5sum | awk '{print $1}')" || { __bail "Cannot compute MD5 ZERO"; return 1; }
-    MD5_FF="$(head -c "${mib}M" /dev/zero | tr '\0' '\377' | md5sum | awk '{print $1}')" || { __bail "Cannot compute MD5 FF"; return 1; }
+    # 2) Еталонні MD5: спочатку беремо з CONF.sh
+    local ref_zero ref_ff
+    ref_zero="${MD5_ZERO:-}"
+    ref_ff="${MD5_FF:-}"
 
+    # 3) Якщо в CONF.sh не задані — рахуємо їх на льоту
+    if [ -z "$ref_zero" ] || [ -z "$ref_ff" ]; then
+        __log "MD5_ZERO/MD5_FF not set in CONF.sh — computing dynamically for ${mib}MiB"
+
+        # ZERO (0x00)
+        ref_zero="$(head -c "${mib}M" /dev/zero | md5sum | awk '{print $1}')" \
+            || { __bail "Cannot compute MD5 ZERO"; return 1; }
+
+        # FF (0xFF)
+        ref_ff="$(head -c "${mib}M" /dev/zero | tr '\0' '\377' | md5sum | awk '{print $1}')" \
+            || { __bail "Cannot compute MD5 FF"; return 1; }
+    else
+        __log "Using MD5_ZERO/MD5_FF from CONF.sh for ${mib}MiB"
+    fi
+
+
+    # 4) Основний цикл тесту
+    local i
     for i in $(seq 1 "$passes"); do
         __log "Memory test pass $i / $passes"
 
         # --- 0x00 ---
-        if ! dd if=/dev/zero of=/tmp/memtest.bin bs=1M count="$mib" oflag=sync iflag=fullblock status=none; then
-            __bail "dd ZERO failed (maybe not enough /tmp space)"; return 1
+        if ! dd if=/dev/zero of=/tmp/memtest.bin bs=1M count="$mib" \
+              oflag=sync iflag=fullblock status=none; then
+            __bail "dd ZERO failed (maybe not enough /tmp space)"
+            return 1
         fi
-        local m="$(md5sum /tmp/memtest.bin | awk '{print $1}')"; rm -f /tmp/memtest.bin
-        [ "$m" = "$MD5_ZERO" ] || { __bail "Memory test ZERO md5 mismatch ($m != $MD5_ZERO)"; return 1; }
+
+        local m
+        m="$(md5sum /tmp/memtest.bin | awk '{print $1}')"
+        rm -f /tmp/memtest.bin
+
+        if [ "$m" != "$ref_zero" ]; then
+            __bail "Memory test ZERO md5 mismatch ($m != $ref_zero)"
+            return 1
+        fi
 
         # --- 0xFF ---
-        if ! head -c "${mib}M" /dev/zero | tr '\0' '\377' | dd of=/tmp/memtest.bin bs=1M oflag=sync iflag=fullblock status=none; then
-            __bail "dd FF failed (maybe not enough /tmp space)"; return 1
+        if ! head -c "${mib}M" /dev/zero | tr '\0' '\377' \
+             | dd of=/tmp/memtest.bin bs=1M oflag=sync iflag=fullblock status=none; then
+            __bail "dd FF failed (maybe not enough /tmp space)"
+            return 1
         fi
-        m="$(md5sum /tmp/memtest.bin | awk '{print $1}')"; rm -f /tmp/memtest.bin
-        [ "$m" = "$MD5_FF" ] || { __bail "Memory test FF md5 mismatch ($m != $MD5_FF)"; return 1; }
+
+        m="$(md5sum /tmp/memtest.bin | awk '{print $1}')"
+        rm -f /tmp/memtest.bin
+
+        if [ "$m" != "$ref_ff" ]; then
+            __bail "Memory test FF md5 mismatch ($m != $ref_ff)"
+            return 1
+        fi
     done
 
     __log "Memory test PASS"
     return 0
 }
+########################################################################
 
 
+########################################################################
 # Перевірка к-сті CPU: очікуємо рівно 4 процесори
 function __dut_system_test_cpu_count() {
-	CPU_COUNT=`cat /proc/cpuinfo | grep processor | wc -l`
+    # Скільки CPU ми очікуємо (з конфіга або 4 за замовчуванням)
+    local expected="${EXPECTED_CPUS:-4}"
+    
+    # Фактична кількість процесорів на DUT
+    local CPU_COUNT
+    CPU_COUNT="$(grep -c '^processor' /proc/cpuinfo 2>/dev/null || echo 0)"
 
-	if [ "$CPU_COUNT" -ne "4" ]; then
- 		__bail "Found $CPU_COUNT CPUs instead of 4 CPUs, FAIL"
-	else
-		__log "4 CPUs found, PASS"
-	fi
+    if [ "$CPU_COUNT" -ne "$expected" ]; then
+        # Якщо щось не співпало — лог і FAIL
+        __bail "Found $CPU_COUNT CPUs instead of ${expected} CPUs, FAIL"
+    else
+        # Все як очікується
+        __log "Found $CPU_COUNT CPUs (expected ${expected}), PASS"
+    fi
 }
+########################################################################
+
 
 # Перевірка обсягу RAM: очікуємо >= ~3.9 ГБ (3900000 kB у MemTotal)
 # Перевірка обсягу оперативної пам'яті (без стрес-тестів)
@@ -379,6 +460,13 @@ function __dut_system_test_fans() {
    	__log "Fan tests PASS"
 }
 
+
+########################################################################
+# Підключаємо додатковий модуль (якщо існує)
+[ -f "/tmp/check_storage_usage.sh" ] && source /tmp/check_storage_usage.sh
+########################################################################
+
+
 ########################################################################
 # --------------- Головний блок виконання ---------------
 if [ "${RUN_ONDEVICE_MAIN:-1}" -eq 1 ]; then
@@ -433,3 +521,5 @@ touch "/tmp/refurbish_test_passed"
 __test_done
 
 fi
+
+

@@ -9,6 +9,49 @@ export SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 
 ########################################################################
+# лог файл формування
+
+# Де зберігаємо всі логи (якщо не задано зовні) 
+LOG_DIR="${LOG_DIR:-"$SCRIPT_DIR/Logs"}"
+mkdir -p "$LOG_DIR"
+
+# Таймстамп поточного запуску тестів
+RUN_TS="${RUN_TS:-$(date +%F_%H-%M-%S)}"
+
+# Головна папка для цього запуску:
+#   приклад: Logs/run_2025-12-03_13-10-00/
+RUN_DIR="${RUN_DIR:-"$LOG_DIR/run_$RUN_TS"}"
+mkdir -p "$RUN_DIR"
+
+# Отримати MAC (LAN) для поточного DUT (CURRENT_DUT уже має бути виставлений)
+_dut_mac_for_logs() {
+    # Зчитуємо MAC з eth0 (або інтерфейсу, де у тебе LAN)
+    local mac
+    mac="$(run_dut_command "cat /sys/class/net/eth0/address 2>/dev/null" \
+          | head -n1 | tr -d '\r\n' 2>/dev/null)" || mac=""
+
+    [ -n "$mac" ] || mac="unknownmac"
+    # Прибираємо двокрапки, щоб шлях був акуратний
+    echo "${mac//:/}"
+}
+
+# Отримати (і створити) папку для логів поточного DUT
+# Використання: local DUT_DIR="$(_dut_log_dir_for_current "$i" "$mac_clean")"
+_dut_log_dir_for_current() {
+    local idx="$1"
+    local mac_clean="$2"
+
+    [ -n "$mac_clean" ] || mac_clean="$(_dut_mac_for_logs)"
+
+    local dir="$RUN_DIR/dut_${idx}_${mac_clean}"
+    mkdir -p "$dir"
+    echo "$dir"
+}
+
+########################################################################
+
+
+########################################################################
 # ------ Підключення конфіга ------
 CONF_FILE="${CONF_FILE:-$SCRIPT_DIR/CONF.sh}"
 [ -r "$CONF_FILE" ] && . "$CONF_FILE" || echo "WARNING: CONF.sh not found, using built-ins"
@@ -46,6 +89,30 @@ SKIP_IPERF=0   # пропустити iPerf3-тест у повному прог
 ########################################################################
 
 
+########################################################################
+# ------ Модуль перевірки процесів на DUT (host-side) ------
+PROC_LIB="$SCRIPT_DIR/funct/check_processes.sh"
+if [ -r "$PROC_LIB" ]; then
+  . "$PROC_LIB"
+else
+  echo "WARNING: $PROC_LIB not found; process checks will be skipped" >&2
+fi
+########################################################################
+
+
+########################################################################
+# ------ Stress-tests модуль ------
+STRESS_LIB="$SCRIPT_DIR/funct/stress_tests.sh"
+
+if [ -r "$STRESS_LIB" ]; then
+  # Підключаємо файл як бібліотеку (визначення функцій стрес-тестів)
+  . "$STRESS_LIB"
+else
+  echo "WARNING: $STRESS_LIB not found; stress tests will be skipped" >&2
+fi
+########################################################################
+
+
 ensure_reachable() {
   local ip="$1"
   ping -c1 -W1 "$ip" >/dev/null 2>&1
@@ -69,14 +136,29 @@ _nm_down_quiet() {
 
 _nm_up_safe() {
   local name="$1"
+
+  # Якщо такого профілю немає — це помилка конфігурації, а не привід
+  # тихо створювати неправильний ethernet-профіль.
   if ! _nm_con_exists "$name"; then
-    # Підійми профіль на першому доступному інтерфейсі (за потреби підстав свій IFACE)
-    local ifname
-    ifname="$(nmcli -t -f DEVICE dev status | head -n1)"
-    nmcli con add type ethernet ifname "$ifname" con-name "$name" autoconnect no >/dev/null
+    echo "⚠️ ERROR: NetworkManager connection \"$name\" does not exist (expected VLAN profile)" >&2
+    return 1
   fi
+
+  # Якщо профіль існує – просто намагаємось його підняти.
   nmcli -w 15 con up "$name" >/dev/null 2>&1
 }
+
+
+#_nm_up_safe() {
+#  local name="$1"
+#  if ! _nm_con_exists "$name"; then
+    # Підійми профіль на першому доступному інтерфейсі (за потреби підстав свій IFACE)
+#    local ifname
+#    ifname="$(nmcli -t -f DEVICE dev status | head -n1)"
+#    nmcli con add type ethernet ifname "$ifname" con-name "$name" autoconnect no >/dev/null
+#  fi
+#  nmcli -w 15 con up "$name" >/dev/null 2>&1
+#}
 
 
 
@@ -112,6 +194,18 @@ if [ -r "$IPERF_LIB" ]; then
   . "$IPERF_LIB"
 else
   echo "WARNING: $IPERF_LIB not found; iPerf3 test will be skipped" >&2
+fi
+########################################################################
+
+
+########################################################################
+# ------ Модуль знімка логів з DUT (host-side) ------
+LOGSNAP_LIB="$SCRIPT_DIR/funct/collect_logs.sh"
+if [ -r "$LOGSNAP_LIB" ]; then
+  # Підключаємо функцію run_logs_snapshot
+  . "$LOGSNAP_LIB"
+else
+  echo "WARNING: $LOGSNAP_LIB not found; logs snapshot will be skipped" >&2
 fi
 ########################################################################
 
@@ -234,9 +328,55 @@ _dut_ifname() {
 
 
 ########################################################################
-# ХЕЛПЕР 3
+# ХЕЛПЕР 3 ПОРТИ у 
+# Тихий режим для port-tests: 1 = тихо, 0 = багатослівно
+: "${RUN_PORT_QUIET:=1}"
+
+# друк у термінал лише коли не тихо
+_q() { [ "${RUN_PORT_QUIET:-1}" -eq 0 ] && echo -e "$@"; :; }
+# друк завжди, але КОРОТКО (статуси)
+_s() { echo -e "$@"; }
 
 ########################################################################
+
+##################################################################
+# ХЕЛПЕР 4 
+# Універсальна функція для SSH на DUT
+# Використовує окремий known_hosts у папці проєкту.
+# Додатково ПЕРЕД кожним підключенням видаляє старий ключ для IP,
+# щоб не ловити "REMOTE HOST IDENTIFICATION HAS CHANGED!"
+##################################################################
+_dut_ssh() {
+    local ip="${1:-192.168.1.1}"   # IP DUT, за замовчуванням 192.168.1.1
+    shift                          # Прибираємо IP з параметрів, далі йдуть команда + аргументи
+
+    # Окремий файл з ключами саме для цього проєкту
+    local kh_file="$SCRIPT_DIR/.known_hosts"
+
+    # Гарантуємо, що файл існує (якщо нема — створюємо порожній)
+    if ! touch "$kh_file" 2>/dev/null; then
+        echo "⚠️ WARNING: не можу створити $kh_file, використовую стандартний known_hosts (~/.ssh/known_hosts)"
+        sshpass -p "${SSH_PASS:-ui}" ssh \
+            -o StrictHostKeyChecking=no \
+            root@"$ip" "$@"
+        return
+    fi
+
+    # ВАЖЛИВО:
+    # При кожному виклику прибираємо можливий старий ключ для цього IP
+    # з ЛОКАЛЬНОГО .known_hosts проєкту.
+    # Так ми не отримаємо "REMOTE HOST IDENTIFICATION HAS CHANGED!",
+    # коли DUT перепрошили чи замінили на інший.
+    ssh-keygen -f "$kh_file" -R "$ip" >/dev/null 2>&1 || true
+
+    # Тепер підключаємось, вказуючи наш локальний known_hosts
+    sshpass -p "${SSH_PASS:-ui}" ssh \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile="$kh_file" \
+        root@"$ip" "$@"
+}
+##################################################################
+
 
 
 ########################################################################
@@ -379,18 +519,72 @@ function check_networkmanager() {
     CONNECTIONS=$(nmcli con show)
 
     #Перевірка чи існують підключення для кожного DUT
-    for i in $(seq 1 $DUT_COUNT); do
-        if echo "$CONNECTIONS" | grep -q "$NM_ETHERNET_NAME"; then
-            FLAG_DUT_LAN_EXISTS[$i]=1
-            echo "DUT $i: NetworkManager connection exists"
-        else
-            echo "DUT $i: NetworkManager connection does not exist"
-        fi
-    done
+#    for i in $(seq 1 $DUT_COUNT); do
+#        if echo "$CONNECTIONS" | grep -q "$NM_ETHERNET_NAME"; then
+#            FLAG_DUT_LAN_EXISTS[$i]=1
+#            echo "DUT $i: NetworkManager connection exists"
+#        else
+#            echo "DUT $i: NetworkManager connection does not exist"
+#        fi
+#    done
 
     #Отримання списку всіх мережевих підключень (команда nmcli -g name con show виводить список імен всіх мережевих підключень).
     #Список мережевих підключень зберігається в масиві TEST_ARRAY.
     readarray -t TEST_ARRAY < <(nmcli -g name con show)
+        # Скидаємо прапорці, тепер будемо виставляти їх коректно
+    FLAG_NM_ETHERNET_NAME_EXISTS=0
+    for i in $(seq 1 $DUT_COUNT); do
+        FLAG_DUT_LAN_EXISTS[$i]=0
+    done
+
+    # Перевіряємо, чи є базове підключення NM_ETHERNET_NAME
+    # та які DUT-профілі вже існують (по імені "DUT i LAN").
+    for name in "${TEST_ARRAY[@]}"; do
+        # Базове підключення
+        if [ "$name" = "$NM_ETHERNET_NAME" ]; then
+            FLAG_NM_ETHERNET_NAME_EXISTS=1
+        fi
+
+        # DUT-профілі
+        for j in $(seq 1 $DUT_COUNT); do
+            if [ "$name" = "DUT $j LAN" ]; then
+                FLAG_DUT_LAN_EXISTS[$j]=1
+            fi
+        done
+    done
+
+    #Якщо підключення NM_ETHERNET_NAME не існує, виводиться повідомлення і сценарій завершується
+    if [ "$FLAG_NM_ETHERNET_NAME_EXISTS" -ne 1 ]; then
+        echo "Connection \"$NM_ETHERNET_NAME\" does not exist!"
+        exit 1
+    fi
+
+    #Активуємо базове підключення
+    nmcli con up "$NM_ETHERNET_NAME"
+
+    ################################################################
+    # НОРМАЛІЗАЦІЯ DUT-профілів:
+    #  - якщо "DUT i LAN" існує, але має тип НЕ "vlan" → видаляємо,
+    #    щоб нижче створити правильний VLAN-профіль.
+    ################################################################
+    for i in $(seq 1 $DUT_COUNT); do
+        cname="DUT $i LAN"
+
+        # Якщо такого профілю взагалі немає — пропускаємо
+        if ! nmcli -g NAME con show 2>/dev/null | grep -Fxq "$cname"; then
+            continue
+        fi
+
+        # Дізнаємося тип профілю (ethernet/vlan/...)
+        ctype="$(nmcli -g connection.type con show "$cname" 2>/dev/null || echo "")"
+
+        if [ "$ctype" != "vlan" ]; then
+            echo "DUT $i LAN exists as type '$ctype' (must be 'vlan') — recreating..."
+            nmcli con delete "$cname" || true
+            FLAG_DUT_LAN_EXISTS[$i]=0
+        fi
+    done
+
     #Перевірка наявності необхідних підключень
     for i in "${TEST_ARRAY[@]}"; do
         #Якщо знайдено підключення з ім'ям NM_ETHERNET_NAME, то змінна FLAG_NM_ETHERNET_NAME_EXISTS встановлюється в 1.
@@ -425,19 +619,6 @@ function check_networkmanager() {
         fi
     done
 }
-##################################################################
-
-
-##################################################################
-create_nm_profile_if_missing() {
-  local name="$1"
-  nmcli -t -f NAME con show | grep -Fx -- "$name" >/dev/null 2>&1 && return 0
-  # створюємо профіль на активному інтерфейсі (підставте свою карту, якщо треба)
-  local ifname="$(nmcli -t -f DEVICE dev status | head -n1)"
-  nmcli con add type ethernet ifname "$ifname" con-name "$name" autoconnect no
-}
-# виклик перед циклами:
-for j in $(seq 1 "$DUT_COUNT"); do create_nm_profile_if_missing "DUT $j LAN"; done
 ##################################################################
 
 
@@ -566,8 +747,6 @@ function dut_upload() {
     [ -n "${DEBUG:-}" ] && echo "dut_upload: OK '$src' → ${user}@${ip}:$dst" | tee -a "$logf"
     return 0
 }
-
-
 ##################################################################
 
 
@@ -709,57 +888,89 @@ function _run_self_tests() {
 # Функції з on-device-tests
 
 # ------------------------------------------------------------
-# Перевірка портів на всіх DUT.
-# - На КОЖНИЙ DUT заливає on-device-tests.sh і CONF.sh (у /tmp)
-# - Робить префлайт (chmod + syntax check)
-# - Викликає ЛИШЕ функцію __dut_8370_test (без автозапуску інших тестів)
-# - Логи пише в $LOG_DIR/port_tests_*.log
-function run_port_tests() {
-    # 1) Логи
-    mkdir -p "$LOG_DIR"
-    local LOG_FILE="$LOG_DIR/port_tests_$(date +%F_%H-%M-%S).log"
-
-    # 2) Підсумки по кожному DUT
+# ---------------------------------------------------------------------------
+# run_port_tests
+#   Головний груповий тест портів у блоці on-device-tests.
+#   - НЕ дублює “PortStatus” (жодних паралельних ручних перевірок усередині).
+#   - Використовує ЄДИНИЙ джерело правди: скрипт check_port_status.sh
+#     (низькорівневий чекер, який ти вже використовуєш у діагностичному PortStatus).
+#   - Для кожного DUT перевіряє ПОРТИ 1..8; якщо хоч один порт впав → весь DUT = failed.
+#   - Повертає ненульовий код, якщо впав хоч один DUT (щоб завалити on-device-tests).
+#   - Пише логи в Logs/port_tests_DUT<i>.log
+#   - “Тихий” режим за замовчуванням (без великого діагностичного виводу),
+#     а при FAIL або якщо встановлено PORTSTATUS_VERBOSE=1 чи DEBUG≥1 → додає детальний лог.
+# ---------------------------------------------------------------------------
+run_port_tests() {
+    # Початкові налаштування
+    unset TEST_RESULTS
     declare -A TEST_RESULTS
+    local -i any_fail=0 dut_fail=0
+    mkdir -p "Logs"
+    local log_prefix="Logs/port_tests"
 
-    # 3) Цикл по DUT (дефолт 1, якщо DUT_COUNT не задано)
+    # За замовчуванням — failed (захист від фальш-PASS)
+    local -i i
+    for i in $(seq 1 "${DUT_COUNT:-1}"); do TEST_RESULTS["$i"]="failed"; done
+
+    _q "----- PortStatus: start -----"
+
     for i in $(seq 1 "${DUT_COUNT:-1}"); do
-        # Виставляємо контекст поточного DUT (IP, MAC тощо)
         set_current_dut "$i"
 
-        echo "Running port tests on DUT $i" | tee -a "$LOG_FILE"
+        local src_ip dst_ip route_line dut_log
+        src_ip="$(_dut_src_ip "$i" 2>/dev/null)"
+        dst_ip="${DUT_TARGET_IP:-192.168.1.1}"
+        dut_log="${log_prefix}_DUT${i}.log"
 
-        # 3.1) Префлайт: заливка файлів + права + перевірка синтаксису
-        if ! run_ondevice_preflight; then
-            echo "Port tests on DUT $i ⚠️ failed (preflight)" | tee -a "$LOG_FILE"
-            TEST_RESULTS[$i]="failed"
-            echo "run_port_tests FINISHED" | tee -a "$LOG_FILE"
-            continue
-        fi
+        # перезаписати лог цього прогону
+        : > "$dut_log"
 
-        # 3.2) Виклик on-device функції (без автозапуску головного блоку)
-        if run_ondevice_func "__dut_8370_test"; then
-            echo "Port tests on DUT $i passed" | tee -a "$LOG_FILE"
-            TEST_RESULTS[$i]="passed"
+        # Інформативний рядок у лог (не в термінал)
+        {
+            echo "Running port tests on DUT $i"
+            route_line="$(ip route get "$dst_ip" from "$src_ip" 2>/dev/null | head -n1)"
+            [ -n "$route_line" ] && echo "DUT $i route: $route_line"
+        } >>"$dut_log"
+
+        dut_fail=0
+        local port ifname
+        for port in 1 2 3 4 5 6 7 8; do
+            ifname="eth${port}"
+
+            # 1) ТИХО: весь вивід check_port_status — ТІЛЬКИ у файл
+            if ! QUIET=1 check_port_status "$i" "$port" "$ifname" "$src_ip" "$dst_ip" >>"$dut_log" 2>&1; then
+                dut_fail=1
+                # 2) Якщо потрібно детально, показати саме проблемний порт у термінал (або в лог)
+                if [ "${PORTSTATUS_VERBOSE:-0}" -eq 1 ] || [ "${DEBUG:-0}" -ge 1 ]; then
+                    echo "----- Detailing FAILED port (DUT $i, port $port) -----" >>"$dut_log"
+                    QUIET=0 check_port_status "$i" "$port" "$ifname" "$src_ip" "$dst_ip" >>"$dut_log" 2>&1
+                fi
+            fi
+        done
+
+        # Підсумок по DUT: в ТЕРМІНАЛ — коротко; деталі вже у файлі
+        if [ "$dut_fail" -ne 0 ]; then
+            TEST_RESULTS["$i"]="failed"
+            any_fail=1
+            _s "Port tests on DUT $i ⚠️ failed"
         else
-            echo "Port tests on DUT $i ⚠️ failed" | tee -a "$LOG_FILE"
-            TEST_RESULTS[$i]="failed"
+            TEST_RESULTS["$i"]="passed"
+            _s "Port tests on DUT $i passed"
         fi
-
-        # 3.3) Маркер завершення для читабельності логів (як у твоєму виводі)
-        echo "run_port_tests FINISHED" | tee -a "$LOG_FILE"
+        _q "run_port_tests FINISHED (DUT $i)"
     done
 
-	# 4) Підсумок + код повернення
-	echo "Port test results:" | tee -a "$LOG_FILE"
-	overall_fail=0
-	for i in $(seq 1 "${DUT_COUNT:-1}"); do
-		res="${TEST_RESULTS[$i]:-n/a}"
-		echo "DUT $i: $res" | tee -a "$LOG_FILE"
-		[ "$res" = "failed" ] && overall_fail=1
-	done
-	return $overall_fail
+    # Зведений підсумок: коротка таблиця в термінал
+    echo "Port test results:"
+    for i in $(seq 1 "${DUT_COUNT:-1}"); do
+        echo "DUT $i: ${TEST_RESULTS[$i]}"
+        [ "${TEST_RESULTS[$i]}" = "failed" ] && any_fail=1
+    done
 
+    _q "----- PortStatus: done ------"
+
+    # Код повернення: завалити on-device-tests, якщо є хоч один FAIL
+    [ "$any_fail" -ne 0 ] && return 1 || return 0
 }
 
 # Зворотна сумісність зі старою назвою
@@ -1027,6 +1238,96 @@ function run_mem_count_tests() {
     echo "Mem-count results:" | tee -a "$LOG_FILE"
     for i in $(seq 1 "${DUT_COUNT:-1}"); do echo "DUT $i: ${TEST_RESULTS[$i]:-n/a}" | tee -a "$LOG_FILE"; done
 }
+# ------------------------------------------------------------
+# Перевірка всіх портів 8370 через swconfig (старий стиль)
+function run_switch_8370_tests() {
+    mkdir -p "$LOG_DIR"
+    local LOG_FILE="$LOG_DIR/switch_8370_$(date +%F_%H-%M-%S).log"
+    declare -A TEST_RESULTS
+
+    for i in $(seq 1 "${DUT_COUNT:-1}"); do
+        set_current_dut "$i"
+        echo "Running 8370 (all ports) test on DUT $i" | tee -a "$LOG_FILE"
+
+        if ! run_ondevice_preflight; then
+            echo "8370 test on DUT $i ⚠️ failed (preflight)" | tee -a "$LOG_FILE"
+            TEST_RESULTS[$i]="failed"; continue
+        fi
+
+        if run_ondevice_func "__dut_8370_test" 2>&1 | tee -a "$LOG_FILE" | tail -n +1 >/dev/null; then
+            echo "8370 test on DUT $i passed" | tee -a "$LOG_FILE"
+            TEST_RESULTS[$i]="passed"
+        else
+            echo "8370 test on DUT $i ⚠️ failed" | tee -a "$LOG_FILE"
+            TEST_RESULTS[$i]="failed"
+        fi
+        echo "run_switch_8370_tests FINISHED" | tee -a "$LOG_FILE"
+    done
+
+    echo "8370 (all ports) test results:" | tee -a "$LOG_FILE"
+    for i in $(seq 1 "${DUT_COUNT:-1}"); do
+        echo "DUT $i: ${TEST_RESULTS[$i]:-n/a}" | tee -a "$LOG_FILE"
+    done
+}
+
+##################################################################
+
+
+##################################################################
+# Перевірка файлової системи DUT (flash + HDD)
+run_storage_usage_tests() {
+    # Загальний summary по всьому запуску (по бажанню)
+    local SUMMARY_FILE="$RUN_DIR/storage_usage_summary.log"
+
+    echo "----- run_storage_usage_tests: start -----" | tee -a "$SUMMARY_FILE"
+
+    declare -A TEST_RESULTS
+    local max_dut="${DUT_COUNT:-1}"
+
+    local i
+    for i in $(seq 1 "$max_dut"); do
+        set_current_dut "$i"
+
+        # MAC для цього DUT
+        local mac_clean
+        mac_clean="$(_dut_mac_for_logs)"
+
+        # Папка для цього DUT
+        local DUT_DIR
+        DUT_DIR="$(_dut_log_dir_for_current "$i" "$mac_clean")"
+
+        # Окремий лог-файл саме для storage-тесту цього DUT
+        local LOG_FILE="$DUT_DIR/storage_usage.log"
+
+        echo "Running storage usage test on DUT $i (MAC=$mac_clean)" \
+            | tee -a "$LOG_FILE" | tee -a "$SUMMARY_FILE"
+
+        # Завантажуємо on-device модуль на DUT
+        dut_upload "$SCRIPT_DIR/funct/check_storage_usage.sh" /tmp/check_storage_usage.sh \
+            >>"$LOG_FILE" 2>&1
+
+        if ! run_ondevice_preflight >>"$LOG_FILE" 2>&1; then
+            echo "⚠️ DUT $i: preflight failed" | tee -a "$LOG_FILE" | tee -a "$SUMMARY_FILE"
+            TEST_RESULTS[$i]="failed"
+            continue
+        fi
+
+        if run_ondevice_func "__dut_system_test_storage_usage" >>"$LOG_FILE" 2>&1; then
+            echo "✅ DUT $i: storage usage OK" | tee -a "$LOG_FILE" | tee -a "$SUMMARY_FILE"
+            TEST_RESULTS[$i]="passed"
+        else
+            echo "❌ DUT $i: storage usage FAILED" | tee -a "$LOG_FILE" | tee -a "$SUMMARY_FILE"
+            TEST_RESULTS[$i]="failed"
+        fi
+    done
+
+    echo "----- StorageUsage: summary -----" | tee -a "$SUMMARY_FILE"
+    for i in $(seq 1 "$max_dut"); do
+        echo "DUT $i: ${TEST_RESULTS[$i]:-n/a}" | tee -a "$SUMMARY_FILE"
+    done
+
+    echo "----- run_storage_usage_tests: done ------" | tee -a "$SUMMARY_FILE"
+}
 ##################################################################
 
 
@@ -1066,60 +1367,11 @@ function _run_wan_tests() {
 	fi
 
     done
+    echo ""
     echo "run_wan_tests $DUT_MAC FINISHED"
 }
 ##################################################################
 
-
-##################################################################
-function run_cpu_stress_test() {
-    echo "Running CPU stress test..."
-    sshpass -p "${SSH_PASS:-ui}" ssh -o StrictHostKeyChecking=no root@192.168.1.1 "stress --cpu 4 --timeout 60"
-}
-##################################################################
-
-
-##################################################################
-function run_memory_stress_test() {
-    echo "Running memory stress test..."
-    sshpass -p "${SSH_PASS:-ui}" ssh -o StrictHostKeyChecking=no root@192.168.1.1 "memtester 1024 5"
-}
-##################################################################
-
-
-##################################################################
-function run_disk_stress_test() {
-    echo "Running disk I/O stress test..."
-    sshpass -p "${SSH_PASS:-ui}" ssh -o StrictHostKeyChecking=no root@192.168.1.1 "dd if=/dev/zero of=/tmp/testfile bs=1G count=10 oflag=direct"
-}
-##################################################################
-
-
-##################################################################
-function run_network_stress_test() {
-    echo "Running network stress test..."
-    sshpass -p "${SSH_PASS:-ui}" ssh -o StrictHostKeyChecking=no root@192.168.1.1 "iperf3 -c <server-ip> -t 60 -P 10"
-}
-##################################################################
-
-
-##################################################################
-function run_temperature_check() {
-    echo "Checking temperature..."
-    sshpass -p "${SSH_PASS:-ui}" ssh -o StrictHostKeyChecking=no root@192.168.1.1 "sensors"
-}
-##################################################################
-
-
-##################################################################
-function run_all_stress_tests() {			#
-    run_cpu_stress_test						#
-    run_memory_stress_test					#
-    run_disk_stress_test					#
-    run_network_stress_test					#
-    run_temperature_check					#
-}
-##################################################################
 
 ##################################################################
 function _dut_touch_tests()
@@ -1141,26 +1393,26 @@ function _dut_touch_tests()
     echo "____________________________________________________________________________________________________"
     
     # -----  Кнопка скидання ----- 
-	#for i in $(seq 1 "${DUT_COUNT:-2}"); do
-	#	set_current_dut "$i"
-	#	sleep 2
+#	for i in $(seq 1 "${DUT_COUNT:-2}"); do
+#		set_current_dut "$i"
+#		sleep 2
 
     	# інтерфейс для цього DUT: v1000..v1011 (формула 999+i)
-    #	src_if="v$((999+i))"
+#    	src_if="v$((999+i))"
 
     	# 1) Підказка користувачу — ЗАВЖДИ
-    #	printf "\n\n(DUT #%d) Briefly press the RESET button (do NOT hold it)\n" "$i"
+#    	printf "\n\n(DUT #%d) Briefly press the RESET button (do NOT hold it)\n" "$i"
 
     	# 2) Ping як діагностика (не блокує підказку)
-    #	if ! ping -I "$src_if" -c1 -W1 192.168.1.1 >/dev/null 2>&1; then
-    #    	echo "WARN: ping via $src_if ⚠️ failed for DUT #$i (продовжуємо за натисканням кнопки)"
-    #	fi
+#    	if ! ping -I "$src_if" -c1 -W1 192.168.1.1 >/dev/null 2>&1; then
+#        	echo "WARN: ping via $src_if ⚠️ failed for DUT #$i (продовжуємо за натисканням кнопки)"
+#    	fi
 
     	# 3) Чекаємо подію від кнопки на DUT
     	#    Якщо у тебе точно event0 — лишай як було;
     	#    нижче — трохи тихіша версія з 'status=none'
-    #	run_dut_command "dd if=/dev/input/event0 of=/dev/null bs=96 count=1 status=none" >/dev/null 2>&1
-	#done
+#    	run_dut_command "dd if=/dev/input/event0 of=/dev/null bs=96 count=1 status=none" >/dev/null 2>&1
+#	done
     
     
 }
@@ -1198,12 +1450,18 @@ echo "__________________________________________________________________________
 ##################################################################
 echo "----- FW: start -----"
 (
-  # У підоболонці тимчасово без "еррехіт" і без pipefail — як у testORIG.sh
-  set +e +o pipefail
-	# Перед FW-апдейтом переконаймось, що NM-профілі прив'язані до реальних інтерфейсів
-	CONF_FILE="$CONF_FILE" bash "$SCRIPT_DIR/funct/nm_fix_vlan_bindings.sh"
+	# У підоболонці тимчасово без "еррехіт" і без pipefail — як у testORIG.sh
+	set +e +o pipefail
+	# Переконуємось, що всі потрібні NM-профілі існують
+	check_networkmanager
+	# Створюємо VLAN-підінтерфейси v1000/v1001/
+	CONF_FILE="$CONF_FILE" bash "$SCRIPT_DIR/funct/prepare_vlan_ifaces.sh"
 
-  _run_fw_check_upgrade
+	# Переприв'язуємо "DUT i LAN" до конкретних VLAN-інтерфейсів v1000/v1001/...
+	CONF_FILE="$CONF_FILE" bash "$SCRIPT_DIR/funct/nm_fix_vlan_bindings.sh"
+	
+	#Запускаємо FW-перевірку/оновлення 
+	_run_fw_check_upgrade
 )
 rc=$?
 echo "----- FW: done ------"
@@ -1244,16 +1502,6 @@ for i in $(seq 1 "$DUT_COUNT"); do
 	# Увімкнути профіль поточного DUT
 	nmcli con up "$(_con_for "$i")" >/dev/null 2>&1 || true
 
-
-	# вимакає усі з'єднання крім з DUT
-	# Активуємо лише профіль поточного DUT і гасимо інші (щоб маршрути/ARP не плутались)
-	#_con_for() { printf "${CONNECTION_TEMPLATE:-DUT %d LAN}" "$1"; }
-
-	#nmcli -t -f NAME con show --active | grep -Fvx -- "$(_con_for "$i")" \
-	#| xargs -r -I{} nmcli con down "{}" >/dev/null 2>&1 || true
-
-	#nmcli con up "$(_con_for "$i")" >/dev/null 2>&1 || true
-
 	# (Опційно) короткий роут-чек: має показати саме інтерфейс/VLAN цього DUT
 	route_line="$(ip route get "$DUT_TARGET_IP" from "$(_dut_src_ip "$i")" 2>/dev/null | head -n1)"
 	echo "DUT $i route: $route_line"
@@ -1278,6 +1526,7 @@ echo "__________________________________________________________________________
 echo ""
 ##################################################################
 
+
 ##################################################################
 echo "----- on-device-tests: start -----"
 : "${OVERALL_FAIL:=0}"   # якщо ще не ініціалізований — зроби 0; інакше збережи попередній стан
@@ -1287,22 +1536,22 @@ echo ""
 #if ! run_fan_tests; then OVERALL_FAIL=1; fi
 echo "____________________________________________________________________________________________________"
 echo ""
-if ! run_bluetooth_tests; then OVERALL_FAIL=1; fi
+#if ! run_bluetooth_tests; then OVERALL_FAIL=1; fi
 echo "____________________________________________________________________________________________________"
 echo ""
-if ! run_sensors_tests; then OVERALL_FAIL=1; fi
+#if ! run_sensors_tests; then OVERALL_FAIL=1; fi
 echo "____________________________________________________________________________________________________"
 echo ""
-if ! run_switch_cpu_port_tests; then OVERALL_FAIL=1; fi
+#if ! run_switch_cpu_port_tests; then OVERALL_FAIL=1; fi
 echo "____________________________________________________________________________________________________"
 echo ""
-if ! run_cpu_count_tests; then OVERALL_FAIL=1; fi
+#if ! run_cpu_count_tests; then OVERALL_FAIL=1; fi
 echo "____________________________________________________________________________________________________"
 echo ""
-if ! run_mem_count_tests; then OVERALL_FAIL=1; fi
+#if ! run_mem_count_tests; then OVERALL_FAIL=1; fi
 echo "____________________________________________________________________________________________________"
 echo ""
-if ! run_memory_tests; then OVERALL_FAIL=1; fi
+#if ! run_memory_tests; then OVERALL_FAIL=1; fi
 echo "____________________________________________________________________________________________________"
 echo ""
 if ! run_sata_tests; then OVERALL_FAIL=1; fi
@@ -1311,7 +1560,8 @@ echo ""
 if ! run_emmc_tests; then OVERALL_FAIL=1; fi
 echo "____________________________________________________________________________________________________"
 echo ""
-#if ! run_wan_tests; then OVERALL_FAIL=1; fi
+#у файлі цей тест, я його не роблю, бо є вже 2 інщі
+if ! run_switch_8370_tests; then OVERALL_FAIL=1; fi
 echo "____________________________________________________________________________________________________"
 echo ""
 if [ "${OVERALL_FAIL:-0}" -ne 0 ]; then
@@ -1329,28 +1579,55 @@ echo ""
 
 ##################################################################
 # Виклик функцій для стрес-тестів
-#run_all_stress_tests
+echo "----- stress_tests: start -----"
+run_all_stress_tests
+echo "----- stress_tests: done ------"
+echo "____________________________________________________________________________________________________"
+echo ""
+##################################################################
+
+
+##################################################################
+# Перевірка важливих процесів на DUT
+echo "----- run_process_checks: start -----"
+run_process_checks
+echo "----- run_process_checks: done ------"
+echo "_____________________________________________________________________________________________"
+echo ""
 ##################################################################
 
 
 ##################################################################
 # Звавнтажує файли на DUT
-_run_self_tests			
+echo "----- run self: start -----"
+_run_self_tests
+echo "----- run self: done ------"
+echo "____________________________________________________________________________________________________"
+echo ""
 ##################################################################
 
 
 ##################################################################
-#echo "----- IPERF: start -----"
-#if [ "${ONLY_IPERF:-0}" -eq 1 ]; then
-#  run_iperf_for_all_duts || OVERALL_FAIL=1
-#else
+echo "----- IPERF: start -----"
+if [ "${ONLY_IPERF:-0}" -eq 1 ]; then
+  run_iperf_for_all_duts || OVERALL_FAIL=1
+else
   # ... інші тести ...
-#  run_iperf_for_all_duts || OVERALL_FAIL=1
+  run_iperf_for_all_duts || OVERALL_FAIL=1
   # ... інші тести ...
-#fi
-#echo "----- IPERF: done ------"
-#echo "____________________________________________________________________________________________________"
-#echo ""
+fi
+echo "----- IPERF: done ------"
+echo "____________________________________________________________________________________________________"
+echo ""
+##################################################################
+
+
+##################################################################
+# --- STORAGE USAGE CHECK ---
+echo ""
+run_storage_usage_tests
+echo "____________________________________________________________________________________________________"
+echo ""
 ##################################################################
 
 
